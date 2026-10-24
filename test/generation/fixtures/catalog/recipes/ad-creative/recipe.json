@@ -1,0 +1,44 @@
+{
+  "result": "pages",
+  "format": "banner",
+  "sizes": [
+    {
+      "id": "banner",
+      "label": "Banner 3:1",
+      "width": 1500,
+      "height": 500
+    },
+    {
+      "id": "landscape",
+      "label": "Landscape 1.91:1",
+      "width": 1200,
+      "height": 628
+    },
+    {
+      "id": "square",
+      "label": "Square 1:1",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "id": "vertical",
+      "label": "Vertical 9:16",
+      "width": 1080,
+      "height": 1920
+    }
+  ],
+  "pages": [
+    "ad"
+  ],
+  "outputs": [
+    "png"
+  ],
+  "fixed_size": false,
+  "required_parts": [
+    {
+      "name": "call to action",
+      "request_field": "cta",
+      "when_missing": "any_text"
+    }
+  ]
+}

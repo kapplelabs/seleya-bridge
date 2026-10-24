@@ -1,0 +1,32 @@
+{
+  "result": "pages",
+  "format": "social",
+  "sizes": [
+    {
+      "id": "post",
+      "label": "Post 4:5",
+      "width": 1080,
+      "height": 1350
+    },
+    {
+      "id": "square",
+      "label": "Square 1:1",
+      "width": 1080,
+      "height": 1080
+    },
+    {
+      "id": "story",
+      "label": "Story 9:16",
+      "width": 1080,
+      "height": 1920
+    }
+  ],
+  "pages": [
+    "post"
+  ],
+  "outputs": [
+    "png"
+  ],
+  "fixed_size": false,
+  "required_parts": []
+}

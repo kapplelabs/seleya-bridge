@@ -1,0 +1,27 @@
+{
+  "result": "pages",
+  "format": "logo",
+  "sizes": [
+    {
+      "id": "square",
+      "label": "Square",
+      "width": 1000,
+      "height": 1000
+    }
+  ],
+  "pages": [
+    "logo"
+  ],
+  "outputs": [
+    "svg",
+    "png"
+  ],
+  "fixed_size": true,
+  "required_parts": [
+    {
+      "name": "brand name",
+      "request_field": "brand_name",
+      "when_missing": "pass"
+    }
+  ]
+}

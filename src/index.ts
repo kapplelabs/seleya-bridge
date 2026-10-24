@@ -13,6 +13,9 @@ import { parseArgs } from "node:util";
 import { bridgeHome, loadConfig } from "./config.ts";
 import { discoverConnectors, EMPTY_CONNECTORS, wantsConnectors } from "./connectors.ts";
 import { Pairing, TokenStore } from "./pairing.ts";
+import { type Generation, startGeneration } from "./generation/main.ts";
+import { type GenerationMount, mountGeneration } from "./generation/mount.ts";
+import { ENGINE_VERSION } from "./generation/recipes.ts";
 import { createBridgeServer } from "./server.ts";
 
 const pkg: unknown = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -37,12 +40,15 @@ function start(port: number | undefined, allowOrigins: string[]): void {
   const tokens = new TokenStore(config.home);
   const pairing = new Pairing(tokens, announceCode);
   let connectors = EMPTY_CONNECTORS;
+  let generation: Generation | undefined;
+  let mount: GenerationMount | undefined;
   const { server, runs } = createBridgeServer({
     config,
     version: VERSION,
     tokens,
     pairing,
     connectors: () => connectors,
+    generation: () => mount,
   });
 
   server.on("error", (error: NodeJS.ErrnoException) => {
@@ -59,6 +65,31 @@ function start(port: number | undefined, allowOrigins: string[]): void {
     console.log(`  workspace:       ${config.workspace}`);
     console.log(`  tools:           ${config.tools.join(", ") || "(none)"}`);
     console.log(`  config:          ${path.join(config.home, "config.json")}`);
+    if (config.generation) {
+      const keys = Object.keys(config.trustedRecipeKeys);
+      void startGeneration({
+        home: path.join(config.home, "generation"),
+        trustedRecipeKeys: config.trustedRecipeKeys,
+      })
+        .then((started) => {
+          generation = started;
+          mount = mountGeneration({
+            app: started.app,
+            tokens,
+            publicOrigin: `http://127.0.0.1:${config.port}`,
+          });
+          console.log(
+            `  generation:      engine ${ENGINE_VERSION}, recipes from ${keys.length ? `key ${keys.join(", ")}` : "no trusted key yet (add trustedRecipeKeys)"}`,
+          );
+          if (started.interrupted)
+            console.log(`  generation:      ${started.interrupted} run(s) from last time marked interrupted`);
+        })
+        .catch((error: unknown) =>
+          console.error(
+            `  generation:      could not start: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        );
+    }
     if (!wantsConnectors(config)) return;
     console.log(
       config.connectors === "auto"
@@ -83,6 +114,7 @@ function start(port: number | undefined, allowOrigins: string[]): void {
 
   const shutdown = () => {
     runs.abortAll();
+    void generation?.close();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   };

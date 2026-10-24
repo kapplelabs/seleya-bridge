@@ -14,11 +14,17 @@ interface Ticket {
 
 export class TicketStore {
   private readonly tickets = new Map<string, Ticket>();
+  private readonly ttlMs: number;
+
+  /** `ttlMs`: how long a ticket stays valid (streams 60 s; generation files 10 min, spec 009 D8). */
+  constructor(ttlMs = TICKET_TTL_MS) {
+    this.ttlMs = ttlMs;
+  }
 
   issue(runId: string): { ticket: string; expiresAt: Date } {
     this.prune();
     const ticket = randomBytes(24).toString("base64url");
-    const expiresAt = Date.now() + TICKET_TTL_MS;
+    const expiresAt = Date.now() + this.ttlMs;
     this.tickets.set(ticket, { runId, expiresAt });
     return { ticket, expiresAt: new Date(expiresAt) };
   }
