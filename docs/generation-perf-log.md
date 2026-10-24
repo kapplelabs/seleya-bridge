@@ -234,3 +234,16 @@ Chi tiết lớp fallback:
 - **Hướng tối ưu tiếp:** khi biết chắc không có agent ảnh nào (ví dụ không agent nào khai báo năng lực ảnh), vẽ SVG ngay thay vì chờ 91 s thử thất bại. Cần quyết định về độ tin của tín hiệu 429 (quota thường hồi trong vài giờ).
 
 225 test pass.
+
+### Bug: Studio hiển thị bản xem trước thay cho bản cuối (2026-10-24 20:0x)
+
+- **Triệu chứng:** người dùng thấy poster không có hình, dù bridge đã vẽ SVG và render lại (`run_063210_mvmfmwute1dd`, PNG cuối trên máy có hình).
+- **Nguyên nhân:**
+  - Khi run hoàn tất, các draft không được post-processor liệt kê lại vẫn được chuyển thành output "final".
+  - Bản xem trước `out/poster.draft.png` (mới có từ pipeline) đứng trước `out/poster.png`.
+  - `generationJson` lấy PNG đầu tiên, nên chọn nhầm bản xem trước.
+- **Sửa:**
+  - Bản xem trước `*.draft.*` không bao giờ thành output.
+  - `generationJson` bỏ qua `*.draft.*` (sửa luôn cho các run cũ đã lưu).
+  - Test: "Studio shows a design's final picture, never its preview".
+- **Kiểm chứng:** tải lại Studio thì cùng run hiển thị `out/poster.png` có hình vẽ. 226 test pass.

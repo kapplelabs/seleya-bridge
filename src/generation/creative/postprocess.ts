@@ -27,6 +27,13 @@ import { type Usecase, usecaseFor } from "./usecases.ts";
 
 const MAX_CORRECTIONS = 2;
 
+/** Step labels for the rounds after a polish, distinct per round (steps are keyed by label). */
+export const again = (step: string, attempt: number) =>
+  attempt === 1 ? `${step} again` : `${step} again (${attempt})`;
+
+/** What the timeline says when the checks found something to polish. */
+export const polishNote = (count: number) => `${count} thing${count > 1 ? "s" : ""} to polish`;
+
 interface ManifestPage {
   name: string;
   html: string;
@@ -188,7 +195,7 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
       for (let attempt = 0; ; attempt++) {
         if (manifest.pages.length === 0)
           throw new Error("the skill did not say which page to render (out/result.json `pages`)");
-        const endRender = step(attempt === 0 ? "Rendering" : `Rendering again (fix ${attempt})`);
+        const endRender = step(attempt === 0 ? "Rendering" : again("Rendering", attempt));
         rendered = [];
         for (const page of manifest.pages) {
           const file = containedPath(folder, page.html);
@@ -206,7 +213,7 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
         );
 
         const endCheck = step(
-          attempt === 0 ? "Checking the design" : `Checking again (fix ${attempt})`,
+          attempt === 0 ? "Checking the design" : again("Checking", attempt),
         );
         checks = await runChecks(
           rendered,
@@ -227,8 +234,9 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
           });
         const failing = checks.filter((check) => !check.passed);
         endCheck(
-          failing.length ? "failed" : "done",
-          failing.length ? `${failing.length} check(s) need a fix` : "All checks passed",
+          // Something to polish is part of the work, not a failure: no alarm in the timeline.
+          "done",
+          failing.length ? polishNote(failing.length) : "All checks passed",
         );
         if (failing.length === 0 || attempt >= MAX_CORRECTIONS) break;
         // A fix that changed nothing the checks see will not do better the second time.
@@ -236,9 +244,9 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
         if (found === lastFound) break;
         lastFound = found;
 
-        const endFix = step(`Fixing what the checks found (${attempt + 1}/${MAX_CORRECTIONS})`);
+        const endFix = step(attempt === 0 ? "Polishing the design" : "Polishing again");
         const exit = await context.runAgain(correctionPrompt(failing, size));
-        endFix(exit.ok ? "done" : "failed", exit.ok ? undefined : exit.message);
+        endFix("done", exit.ok ? undefined : "Kept as it was");
         if (!exit.ok) break;
         // A correction that did not rewrite the page list keeps the pages it had.
         const corrected = readManifest(

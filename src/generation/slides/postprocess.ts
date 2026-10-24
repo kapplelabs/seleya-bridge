@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import path from "node:path";
 
 import { checkFacts, checkLayout, checkVisualText } from "../creative/checks.ts";
-import { requestText } from "../creative/postprocess.ts";
+import { again, polishNote, requestText } from "../creative/postprocess.ts";
 import { findDelivered } from "../media/catalog.ts";
 import { containedPath } from "../paths.ts";
 import { type ChromeRenderer, RenderError, type RenderResult } from "../render/chrome.ts";
@@ -217,18 +217,18 @@ export function slidesPostProcessor(renderer: ChromeRenderer, home?: string): Po
     for (let attempt = 0; ; attempt++) {
       const deck = loadDeck(folder);
       if (deck.slides.length === 0) throw new Error("the skill wrote no slides (out/deck.json)");
-      const endRender = step(attempt === 0 ? "Rendering" : `Rendering again (fix ${attempt})`);
+      const endRender = step(attempt === 0 ? "Rendering" : again("Rendering", attempt));
       try {
         rendered = await renderDeck(renderer, folder, deck, run.request, home);
       } catch (error) {
         // No browser could render here: the deck's content is still the result (Writing shows it).
         if (!(error instanceof RenderError)) throw error;
-        endRender("failed", "Not rendered on this computer");
+        endRender("done", "Shown from its content: no browser to render here");
         return unrenderedDeck(folder, deck, run.request, error.message);
       }
       endRender("done", `${deck.slides.length} slides and a PDF`);
       const endCheck = step(
-        attempt === 0 ? "Checking the slides" : `Checking again (fix ${attempt})`,
+        attempt === 0 ? "Checking the slides" : again("Checking", attempt),
       );
       for (const check of rendered.checks)
         emit("seleya.check.result", {
@@ -242,15 +242,16 @@ export function slidesPostProcessor(renderer: ChromeRenderer, home?: string): Po
         (check) => !check.passed && check.name !== "text in pictures",
       );
       endCheck(
-        failing.length ? "failed" : "done",
-        failing.length ? `${failing.length} check(s) need a fix` : "All checks passed",
+        // Something to polish is part of the work, not a failure: no alarm in the timeline.
+        "done",
+        failing.length ? polishNote(failing.length) : "All checks passed",
       );
       if (failing.length === 0 || attempt >= MAX_CORRECTIONS) break;
       // A fix that changed nothing the checks see will not do better the second time.
       const found = JSON.stringify(failing.map((check) => check.findings));
       if (found === lastFound) break;
       lastFound = found;
-      const endFix = step(`Fixing what the checks found (${attempt + 1}/${MAX_CORRECTIONS})`);
+      const endFix = step(attempt === 0 ? "Polishing the design" : "Polishing again");
       const exit = await context.runAgain(
         [
           "Seleya rendered your slides and found problems. Fix ONLY these, keep everything else the same:",
@@ -258,7 +259,7 @@ export function slidesPostProcessor(renderer: ChromeRenderer, home?: string): Po
           "Update both the per-slide files and out/deck.json, then rewrite out/result.json.",
         ].join("\n"),
       );
-      endFix(exit.ok ? "done" : "failed", exit.ok ? undefined : exit.message);
+      endFix("done", exit.ok ? undefined : "Kept as it was");
       if (!exit.ok) break;
     }
     const deck = loadDeck(folder);

@@ -6,6 +6,8 @@ import { after, test } from "node:test";
 
 import { editContext, PREVIOUS_RESULT, saveLayout, textsInRegion } from "../../src/generation/creative/edit.ts";
 import { plannedFor } from "../../src/generation/runs/manager.ts";
+import type { RunRow } from "../../src/generation/runs/types.ts";
+import { generationJson } from "../../src/generation/server/routes/studio.ts";
 import { answerJson, earlyImagePrompt } from "../../src/generation/creative/pipeline.ts";
 import type { Harness } from "../../src/generation/harness/types.ts";
 import {
@@ -195,7 +197,10 @@ test(
         [false, true],
         "failed once, then passed after the fix",
       );
-      assert.ok(done.steps.some((step) => step.label.startsWith("Fixing what the checks found")));
+      assert.ok(done.steps.some((step) => step.label === "Polishing the design"));
+      // Something to polish is shown calmly: no step of the timeline reads as failed.
+      assert.equal(done.steps.some((step) => step.status === "failed"), false);
+      assert.equal(done.steps.find((step) => step.label === "Checking the design")?.detail, "1 thing to polish");
       assert.ok(existsSync(path.join(t.config.runsDir, run.id, "out", "poster.png")));
       assert.ok(existsSync(path.join(t.config.runsDir, run.id, "out", "poster.pdf")));
     } finally {
@@ -537,4 +542,25 @@ test("pipeline: with no picture, the design's agent draws one as SVG, cleaned of
   } finally {
     await t.cleanup();
   }
+});
+
+test("Studio shows a design's final picture, never its preview", () => {
+  const run = {
+    id: "run_x",
+    request: { width: 1000, height: 1500 },
+    attempt: 1,
+    localStatus: "completed",
+    phase: "completed",
+    checks: [],
+    outputs: [
+      { path: "out/poster.draft.png", kind: "png", slot: "poster", state: "final" },
+      { path: "out/poster.png", kind: "png", slot: "poster", state: "final" },
+      { path: "out/visual.svg", kind: "svg", slot: "visual", state: "final" },
+    ],
+  } as unknown as RunRow;
+  const json = generationJson(
+    { id: "gen_x", title: "Seleya", request: { format: "poster" }, runIds: ["run_x"], createdAt: 0 },
+    [run],
+  );
+  assert.match(String(json.images[0]?.url), /out\/poster\.png/);
 });

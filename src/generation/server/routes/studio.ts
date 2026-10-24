@@ -47,7 +47,11 @@ export function generationJson(generation: GenerationRow, runs: RunRow[]) {
   const request = generation.request;
   const images = runs.flatMap((run, index) => {
     const png = run.outputs.find(
-      (output) => output.kind === "png" && output.state === "final" && output.slot !== "visual",
+      (output) =>
+        output.kind === "png" &&
+        output.state === "final" &&
+        output.slot !== "visual" &&
+        !/\.draft\./.test(output.path),
     );
     // Not rendered on this computer: the design is shown as its web page (creative/postprocess.ts).
     const page = png

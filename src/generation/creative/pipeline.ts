@@ -206,10 +206,8 @@ export async function runCreativePipeline(
     if (picture || !prompt.trim()) return;
     const endPicture = context.step("Making the picture");
     picture = context.makeImage(prompt, aspectOf(size)).then((made) => {
-      endPicture(
-        made.file ? "done" : "failed",
-        made.file ? undefined : `No picture (${made.reason ?? "no agent made it"}): the design keeps its colours.`,
-      );
+      // Not an alarm: the design's own agent draws the picture next (drawInstead).
+      endPicture("done", made.file ? undefined : `Not available (${made.reason ?? "no agent made it"})`);
       return made;
     });
   };
@@ -299,7 +297,7 @@ async function runEdit(context: PipelineContext): Promise<void> {
     endEdit("done", "New picture requested");
     const endPicture = context.step("Making the picture");
     const { file, reason } = await context.makeImage(str(answer.image_prompt)!, aspectOf(context.size));
-    endPicture(file ? "done" : "failed", reason);
+    endPicture("done", file ? undefined : `Not available (${reason ?? "no agent made it"})`);
     if (placeVisual(folder, file)) {
       // A design made by the agent loop shows `visual.png`: point it at the new picture.
       showPicture(folder, pages, VISUAL);

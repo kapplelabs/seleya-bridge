@@ -600,8 +600,11 @@ export class RunRunner {
       runAgain: (prompt, options) => this.runAgain(prompt, options),
     });
     const checks = extra ? [...result.checks, extra] : result.checks;
+    // Seleya's own previews (`*.draft.png`) are never results: a design's preview showed instead of
+    // its final picture.
     const drafts = this.run.outputs.filter(
-      (draft) => !result.outputs.some((output) => output.path === draft.path),
+      (draft) =>
+        !result.outputs.some((output) => output.path === draft.path) && !/\.draft\./.test(draft.path),
     );
     this.save({
       outputs: [
