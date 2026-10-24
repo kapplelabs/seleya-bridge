@@ -564,3 +564,109 @@ test("Studio shows a design's final picture, never its preview", () => {
   );
   assert.match(String(json.images[0]?.url), /out\/poster\.png/);
 });
+
+/** A recipe of the fixture catalog turned into a pipeline recipe (its SPEC.md is enough here). */
+function pipelineRecipe(id: string) {
+  return signedRecipe(id, (recipe) => {
+    recipe.files[`${id}/SPEC.md`] = `# ${id}\n\nFollow \`skills/CREATIVE-SPEC.md\`.`;
+    recipe.files["CREATIVE-SPEC.md"] = "Answer with one JSON object.";
+    recipe.files[`${id}/recipe.json`] = JSON.stringify({ ...JSON.parse(recipe.files[`${id}/recipe.json`]!), pipeline: "spec" });
+  });
+}
+
+test("pipeline: a logo saves its vector, a custom design its definition and size, a card two pages", async () => {
+  const t = makeTestApp();
+  try {
+    const run = async (id: string, request: Record<string, unknown>, answer: Record<string, unknown>) => {
+      const { digest } = t.app.recipes.accept(pipelineRecipe(id));
+      const created = t.app.manager.create({
+        skill: id,
+        title: id,
+        request: { recipe_digest: digest, ...request, script: [{ answer: JSON.stringify(answer) }] },
+      });
+      await advanceUntil(t.clock, () => finished(t.app.manager.get(created.id).localStatus));
+      return { run: t.app.manager.get(created.id), out: path.join(t.config.runsDir, created.id, "out") };
+    };
+
+    const logo = await run("logo", { prompt: "Logo for Mây", brand_name: "Mây" }, {
+      image_prompt: "",
+      brief: { brand_name: "Mây" },
+      concept: {},
+      vector: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><circle cx="400" cy="400" r="300"/><text x="400" y="420">Mây</text><script>x()</script></svg>',
+      pages: [{ name: "logo", html: '<body><img src="logo.svg" width="800" height="800"></body>' }],
+    });
+    assert.equal(logo.run.localStatus, "completed", JSON.stringify(logo.run.error));
+    assert.deepEqual(
+      logo.run.plannedSteps.map((step) => step.label),
+      ["Designing", "Rendering", "Checking the design"],
+      "no picture step for a format without a picture",
+    );
+    const svg = readFileSync(path.join(logo.out, "logo.svg"), "utf8");
+    assert.match(svg, /<text x="400" y="420">Mây<\/text>/);
+    assert.doesNotMatch(svg, /script/);
+    assert.equal(JSON.parse(readFileSync(path.join(logo.out, "result.json"), "utf8")).vector, "out/logo.svg");
+
+    // An edit of the logo's name changes the vector, where the wordmark is.
+    const renamed = t.app.manager.create(
+      {
+        skill: "logo",
+        title: "Rename",
+        request: {
+          ...logo.run.request,
+          edit_instruction: 'Đổi tên thành "Mây Trà"',
+          script: [{ answer: JSON.stringify({ kind: "text", replacements: [{ from: "Mây", to: "Mây Trà" }] }) }],
+        },
+      },
+      undefined,
+      logo.run,
+    );
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(renamed.id).localStatus));
+    assert.equal(t.app.manager.get(renamed.id).localStatus, "completed", JSON.stringify(t.app.manager.get(renamed.id).error));
+    assert.match(
+      readFileSync(path.join(t.config.runsDir, renamed.id, "out", "logo.svg"), "utf8"),
+      /<text x="400" y="420">Mây Trà<\/text>/,
+    );
+
+    const custom = await run("virtual-creative-usecase", { prompt: "A ticket for Mây Night, 20:00 Friday" }, {
+      definition: {
+        deliverable: "ticket",
+        size: { width_px: 1600, height_px: 600, why: "event ticket" },
+        pages: [{ name: "ticket", width: 1600, height: 600 }],
+        needs_visual: false,
+        content_inventory: ["Mây Night", "20:00 Friday"],
+        required_parts: [],
+      },
+      image_prompt: "",
+      brief: {},
+      concept: {},
+      pages: [{ name: "ticket", width: 1600, height: 600, html: "<body><h1>Mây Night</h1><p>20:00 Friday</p></body>" }],
+    });
+    assert.equal(custom.run.localStatus, "completed", JSON.stringify(custom.run.error));
+    assert.equal(JSON.parse(readFileSync(path.join(custom.out, "definition.json"), "utf8")).deliverable, "ticket");
+    assert.equal(
+      custom.run.steps.find((step) => step.label === "Making the picture")?.status,
+      "done",
+      "a design without a picture does not leave its picture step waiting",
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(path.join(custom.out, "result.json"), "utf8")).pages[0],
+      { name: "ticket", html: "out/ticket.html", width: 1600, height: 600 },
+    );
+
+    const card = await run("business-card", { prompt: "Card for Lan" }, {
+      image_prompt: "",
+      brief: {},
+      concept: {},
+      pages: [
+        { name: "front", html: "<body><h1>Lan</h1></body>" },
+        { name: "back", html: "<body><p>lan@may.vn</p></body>" },
+      ],
+    });
+    assert.deepEqual(
+      JSON.parse(readFileSync(path.join(card.out, "result.json"), "utf8")).pages.map((page: { name: string; width: number }) => [page.name, page.width]),
+      [["front", 1050], ["back", 1050]],
+    );
+  } finally {
+    await t.cleanup();
+  }
+});
