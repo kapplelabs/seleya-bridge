@@ -43,6 +43,17 @@ const configSchema = z.object({
   tools: z.array(z.string()).default(["Read", "Glob", "Grep"]),
   /** Model override; omit to use Claude Code's default. */
   model: z.string().optional(),
+  /** The provider a run uses when the request names none. */
+  defaultProvider: z.enum(["claude"]).default("claude"),
+  /** Claude models Seleya may ask for besides `model`. */
+  models: z.array(z.string().min(1)).default([]),
+  /** Ceilings on what one run may ask for; a request asking for more gets these. */
+  limits: z
+    .object({
+      maxTurns: z.number().int().min(1).max(500).default(60),
+      maxToolOutputTokens: z.number().int().min(1000).max(500_000).default(100_000),
+    })
+    .default({ maxTurns: 60, maxToolOutputTokens: 100_000 }),
   /** Path to a `claude` executable; omit to use the one bundled with the Agent SDK. */
   claudeExecutable: z.string().optional(),
   /**

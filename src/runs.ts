@@ -1,8 +1,11 @@
 /**
- * A run is one Claude turn answering one prompt. Its events are kept in order so a stream can be
+ * A run is one provider turn answering one prompt. Its events are kept in order so a stream can be
  * replayed from the start (new ticket) or resumed after a given event id (Last-Event-ID).
  */
 import { randomUUID } from "node:crypto";
+
+import type { ProviderId, RunFailureCode } from "./engine/types.ts";
+import { Redactor } from "./redact.ts";
 
 /** How long a finished run stays readable, for late or reconnecting streams. */
 const RETENTION_MS = 10 * 60 * 1000;
@@ -18,33 +21,59 @@ type Listener = (event: RunEvent) => void;
 
 export const isTerminalType = (type: string) => type === "stream.done" || type === "stream.error";
 
+export interface RunError {
+  code: RunFailureCode;
+  message: string;
+  retryable: boolean;
+}
+
+export interface RunInit {
+  /** The provider session (Claude Code session id), always the bridge's own. */
+  sessionId: string;
+  /** False: a one-off run that keeps no transcript; its session id isn't given to the caller. */
+  persisted: boolean;
+  /** The paired browser (token record id) that started the run: the only one that may read or stop it. */
+  ownerId: string;
+  provider: ProviderId;
+}
+
 export class Run {
   readonly id = randomUUID();
-  readonly assistantMessageId = randomUUID();
   readonly createdAt = new Date();
   readonly abort = new AbortController();
-  /** The Claude Code session this run belongs to: Seleya's conversation id. */
+  /** Everything removed with it, before the model reads or after it writes, counts in run.completed. */
+  readonly redactor = new Redactor();
   readonly sessionId: string;
-  /** The paired browser (token record id) that started the run: the only one that may read or stop it. */
+  readonly persisted: boolean;
   readonly ownerId: string;
+  readonly provider: ProviderId;
   readonly events: RunEvent[] = [];
-  /**
-   * What a report run produced (a briefing, a calendar week), served by GET /v1/runs/:id/result as
-   * `{ [key]: value }`. Already redacted.
-   */
-  result: { key: string; value: object } | undefined;
+  /** The final answer, redacted; set when the run completes. */
+  text: string | undefined;
+  /** The structured output, redacted; set when a run with an output schema completes. */
+  output: object | undefined;
+  /** Why the run failed or was cancelled. */
+  error: RunError | undefined;
   private readonly listeners = new Set<Listener>();
   private onFinish: (() => void) | undefined;
 
-  constructor(sessionId: string, ownerId: string, onFinish: () => void) {
+  constructor({ sessionId, persisted, ownerId, provider }: RunInit, onFinish: () => void) {
     this.sessionId = sessionId;
+    this.persisted = persisted;
     this.ownerId = ownerId;
+    this.provider = provider;
     this.onFinish = onFinish;
   }
 
   get finished(): boolean {
     const last = this.events.at(-1);
     return last !== undefined && isTerminalType(last.type);
+  }
+
+  get status(): "running" | "completed" | "failed" | "cancelled" {
+    if (!this.finished) return "running";
+    if (!this.error) return "completed";
+    return this.error.code === "cancelled" ? "cancelled" : "failed";
   }
 
   emit(type: string, data?: object): void {
@@ -77,13 +106,13 @@ export class RunRegistry {
     this.onBusyChange = onBusyChange;
   }
 
-  /** One run at a time: Claude Code works on this machine, and a second caller shouldn't pile on. */
+  /** One run at a time: the provider works on this machine, and a second caller shouldn't pile on. */
   get busy(): boolean {
     return this.active !== undefined;
   }
 
-  create(sessionId: string, ownerId: string): Run {
-    const run = new Run(sessionId, ownerId, () => {
+  create(init: RunInit): Run {
+    const run = new Run(init, () => {
       if (this.active === run) {
         this.active = undefined;
         this.onBusyChange?.(false);
