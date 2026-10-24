@@ -92,6 +92,13 @@ const configSchema = z.object({
       ),
     ])
     .default({}),
+  /**
+   * Keys whose signed recipes generation runs (spec 009): key id → Ed25519 public key, base64 SPKI
+   * (Seleya's public/catalog/keys.json). Only recipes signed by one of these are run.
+   */
+  trustedRecipeKeys: z.record(z.string().regex(/^[0-9a-f]{16}$/), z.string().min(40)).default({}),
+  /** Generation on or off (spec 009). */
+  generation: z.boolean().default(true),
 });
 
 /** config.json as written, defaults filled in. */

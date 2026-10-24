@@ -302,6 +302,8 @@ const config = {
   link: { enabled: true, connectors: "all", maxRunsPerDay: 24, minIntervalMinutes: 30 },
   claudeExecutable: "/bin/claude",
   connectors: "auto",
+  trustedRecipeKeys: {},
+  generation: false,
   home: "/tmp/home",
 } satisfies BridgeConfig;
 

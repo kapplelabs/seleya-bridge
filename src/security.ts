@@ -34,7 +34,7 @@ export function setCorsHeaders(res: ServerResponse, origin: string): void {
 
 /** Answers a CORS preflight from an allowed origin. */
 export function sendPreflight(req: IncomingMessage, res: ServerResponse): void {
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, Last-Event-ID");
   res.setHeader("Access-Control-Max-Age", "600");
   // Chrome's Private Network Access: a public https page reaching loopback asks for this first.

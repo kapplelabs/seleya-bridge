@@ -1,0 +1,21 @@
+{
+  "result": "pages",
+  "format": "poster",
+  "sizes": [
+    {
+      "id": "2:3",
+      "label": "Poster 2:3",
+      "width": 1000,
+      "height": 1500
+    }
+  ],
+  "pages": [
+    "poster"
+  ],
+  "outputs": [
+    "png",
+    "pdf"
+  ],
+  "fixed_size": false,
+  "required_parts": []
+}

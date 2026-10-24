@@ -1,0 +1,9 @@
+{
+  "result": "deck",
+  "format": "slides",
+  "counts": {
+    "short": 5,
+    "medium": 8,
+    "long": 12
+  }
+}

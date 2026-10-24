@@ -18,11 +18,22 @@ interface Ticket {
 
 export class TicketStore {
   private readonly tickets = new Map<string, Ticket>();
+  private readonly ttlMs: number;
+  private readonly maxUses: number;
+
+  /**
+   * `ttlMs`: how long a ticket stays valid (streams 60 s; generation files 10 min, spec 009 D8).
+   * `maxUses`: how many requests it opens (generation file tickets are reused for every file of a run).
+   */
+  constructor(ttlMs = TICKET_TTL_MS, maxUses = MAX_USES) {
+    this.ttlMs = ttlMs;
+    this.maxUses = maxUses;
+  }
 
   issue(runId: string): { ticket: string; expiresAt: Date } {
     this.prune();
     const ticket = randomBytes(24).toString("base64url");
-    const expiresAt = Date.now() + TICKET_TTL_MS;
+    const expiresAt = Date.now() + this.ttlMs;
     this.tickets.set(ticket, { runId, expiresAt, uses: 0 });
     return { ticket, expiresAt: new Date(expiresAt) };
   }
@@ -30,7 +41,7 @@ export class TicketStore {
   /** Checks the ticket for `runId` and counts one use of it. */
   use(ticket: string, runId: string): boolean {
     const entry = this.tickets.get(ticket);
-    if (entry === undefined || entry.runId !== runId || Date.now() > entry.expiresAt || entry.uses >= MAX_USES)
+    if (entry === undefined || entry.runId !== runId || Date.now() > entry.expiresAt || entry.uses >= this.maxUses)
       return false;
     entry.uses += 1;
     return true;

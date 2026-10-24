@@ -8,6 +8,7 @@ import { after, before, describe, test } from "node:test";
 
 import type { BridgeConfig } from "./config.ts";
 import type { AgentEvent, ProviderAdapter, ProviderId, ProviderStatus, RunSpec } from "./engine/types.ts";
+import { ENGINE_VERSION } from "./generation/recipes.ts";
 import { Pairing, TokenStore } from "./pairing.ts";
 import type { LinkService } from "./link/service.ts";
 import { ResultStore } from "./results.ts";
@@ -175,7 +176,15 @@ describe("server", () => {
   test("health has no connectors", async () => {
     const { status, body } = await call("GET", "/v1/health");
     assert.equal(status, 200);
-    assert.deepEqual(body, { name: "seleya-bridge", version: "9.9.9", distribution: "cli", paired: true, busy: false });
+    assert.deepEqual(body, {
+      name: "seleya-bridge",
+      version: "9.9.9",
+      distribution: "cli",
+      paired: true,
+      busy: false,
+      engine: ENGINE_VERSION,
+      generation: false,
+    });
   });
 
   test("capabilities need a token", async () => {

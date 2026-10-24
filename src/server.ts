@@ -38,6 +38,8 @@ import {
 } from "./engine/policy.ts";
 import { TEMPLATE_VARS } from "./engine/template.ts";
 import type { ProviderAdapter, ProviderId } from "./engine/types.ts";
+import { type GenerationMount, GENERATION_PREFIX } from "./generation/mount.ts";
+import { ENGINE_VERSION } from "./generation/recipes.ts";
 import { HttpError, readJson, sendEmpty, sendError, sendJson } from "./http.ts";
 import { LINK_OWNER } from "./link/policy.ts";
 import type { LinkService } from "./link/service.ts";
@@ -83,6 +85,8 @@ export interface BridgeDeps {
   link?: LinkService;
   /** A provider started or finished answering a request. */
   onBusyChange?: (busy: boolean) => void;
+  /** Generation (spec 009), served under /v1/generation; absent while it starts or when off. */
+  generation?: () => GenerationMount | undefined;
 }
 
 /** A kept result as the wire shows it: the output and meta keep the keys Seleya wrote. */
@@ -101,7 +105,8 @@ export function createBridgeServer(deps: BridgeDeps): {
   server: Server;
   runs: RunRegistry;
 } {
-  const { config, version, distribution, tokens, pairing, sessions, providers, results, onBusyChange } = deps;
+  const { config, version, distribution, tokens, pairing, sessions, providers, results, onBusyChange, generation } =
+    deps;
   // Read on each request: the bridge creates the link after the server (it needs the run registry).
   const linkService = () => deps.link;
   const runs = new RunRegistry(onBusyChange);
@@ -157,6 +162,9 @@ export function createBridgeServer(deps: BridgeDeps): {
         distribution,
         paired: token !== undefined && tokens.find(token, origin) !== undefined,
         busy: runs.busy,
+        // Recipes name the engine they need (spec 009); the page compares before starting one.
+        engine: ENGINE_VERSION,
+        generation: generation?.() !== undefined,
       });
     }
 
@@ -322,7 +330,18 @@ export function createBridgeServer(deps: BridgeDeps): {
     }
     if (req.method === "OPTIONS") return sendPreflight(req, res);
 
-    route(req, res, origin).catch((error: unknown) => {
+    // Generation has its own queue and routes (spec 009); chat's one-at-a-time rule doesn't apply.
+    const url = req.url ?? "/";
+    const generationMount = generation?.();
+    const handled =
+      url === GENERATION_PREFIX || url.startsWith(`${GENERATION_PREFIX}/`)
+        ? generationMount
+          ? generationMount.handle(req, res, origin)
+          : Promise.reject(
+              new HttpError(503, "generation_starting", "Generation is still starting, try again"),
+            )
+        : route(req, res, origin);
+    handled.catch((error: unknown) => {
       const httpError =
         error instanceof HttpError ? error : new HttpError(500, "internal_error", "Something went wrong in the bridge");
       if (!(error instanceof HttpError)) console.error(error);

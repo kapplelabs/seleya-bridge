@@ -1,0 +1,21 @@
+{
+  "result": "pages",
+  "format": "menu",
+  "sizes": [
+    {
+      "id": "a4",
+      "label": "A4 portrait",
+      "width": 1240,
+      "height": 1754
+    }
+  ],
+  "pages": [
+    "menu"
+  ],
+  "outputs": [
+    "png",
+    "pdf"
+  ],
+  "fixed_size": true,
+  "required_parts": []
+}

@@ -1,10 +1,14 @@
 /**
- * Starts and stops the bridge: config, paired tokens, pairing, the HTTP server and the providers (whose
- * start runs connector discovery). Shared by the CLI (index.ts), which prints what happens, and the Seleya
+ * Starts and stops the bridge: config, paired tokens, pairing, the HTTP server, the providers (whose
+ * start runs connector discovery) and generation (spec 009). Shared by the CLI (index.ts), which prints what happens, and the Seleya
  * Bridge app (app/), which shows it.
  */
+import path from "node:path";
+
 import { loadConfig, type BridgeConfig, type ConfigOverrides } from "./config.ts";
 import type { ProviderAdapter, ProviderId } from "./engine/types.ts";
+import { type Generation, startGeneration } from "./generation/main.ts";
+import { type GenerationMount, mountGeneration } from "./generation/mount.ts";
 import { Pairing, TokenStore, type PairingListener } from "./pairing.ts";
 import { ResultStore } from "./results.ts";
 import { LinkService, type LinkView } from "./link/service.ts";
@@ -13,6 +17,9 @@ import type { ConnectorSet } from "./providers/claude/connectors.ts";
 import { type BridgeDistribution, createBridgeServer } from "./server.ts";
 import { SessionStore } from "./sessions.ts";
 
+/** Generation started (with the keys it trusts and the runs it found cut off), or failed to. */
+export type GenerationState = { trustedKeys: string[]; interrupted: number } | { error: string };
+
 export interface BridgeListener extends PairingListener {
   /** Connector discovery finished; only called when the config asks for connectors. */
   connectors?: (set: ConnectorSet) => void;
@@ -20,6 +27,8 @@ export interface BridgeListener extends PairingListener {
   busy?: (busy: boolean) => void;
   /** The server link's state, schedules or last runs changed. */
   link?: (view: LinkView) => void;
+  /** Generation finished starting; only called when the config turns it on. */
+  generation?: (state: GenerationState) => void;
 }
 
 export interface BridgeOptions {
@@ -81,6 +90,8 @@ export async function startBridge({
   const providers = new Map<ProviderId, ProviderAdapter>([[claude.id, claude]]);
   // The server's run registry exists only once the server does; the link reaches it through this.
   let link: LinkService | undefined;
+  let generation: Generation | undefined;
+  let mount: GenerationMount | undefined;
   const { server, runs } = createBridgeServer({
     config,
     version,
@@ -97,6 +108,7 @@ export async function startBridge({
       listener.busy?.(busy);
       if (!busy) link?.idle();
     },
+    generation: () => mount,
   });
   const linkService = new LinkService({
     config,
@@ -124,6 +136,20 @@ export async function startBridge({
 
   for (const provider of providers.values()) await provider.start();
   linkService.start();
+  if (config.generation)
+    void startGeneration({ home: path.join(config.home, "generation"), trustedRecipeKeys: config.trustedRecipeKeys })
+      .then((started) => {
+        if (stopped) return void started.close();
+        generation = started;
+        mount = mountGeneration({ app: started.app, tokens, publicOrigin: `http://127.0.0.1:${config.port}` });
+        listener.generation?.({
+          trustedKeys: Object.keys(config.trustedRecipeKeys),
+          interrupted: started.interrupted,
+        });
+      })
+      .catch((error: unknown) =>
+        listener.generation?.({ error: error instanceof Error ? error.message : String(error) }),
+      );
 
   return {
     config,
@@ -140,6 +166,7 @@ export async function startBridge({
         linkService.stop();
         runs.abortAll();
         void Promise.all([...providers.values()].map((provider) => provider.stop()));
+        void generation?.close();
         server.close(() => resolve());
         // Open streams would keep close() waiting.
         server.closeAllConnections();

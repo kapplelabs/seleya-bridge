@@ -11,8 +11,9 @@
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
-import { startBridge } from "./bridge.ts";
+import { type GenerationState, startBridge } from "./bridge.ts";
 import { bridgeHome, configPath, isLoopbackOrigin } from "./config.ts";
+import { ENGINE_VERSION } from "./generation/recipes.ts";
 import { unlinkStored } from "./link/client.ts";
 import { LinkStore } from "./link/store.ts";
 import type { ConnectorSet } from "./providers/claude/connectors.ts";
@@ -55,12 +56,27 @@ function announceConnectors(found: ConnectorSet): void {
     console.log(`  connectors:      skipped ${found.skipped.length} not connected here: ${found.skipped.join(", ")}`);
 }
 
+function announceGeneration(state: GenerationState): void {
+  if ("error" in state) return void console.error(`  generation:      could not start: ${state.error}`);
+  const keys = state.trustedKeys;
+  console.log(
+    `  generation:      engine ${ENGINE_VERSION}, recipes from ${keys.length ? `key ${keys.join(", ")}` : "no trusted key yet (add trustedRecipeKeys)"}`,
+  );
+  if (state.interrupted)
+    console.log(`  generation:      ${state.interrupted} run(s) from last time marked interrupted`);
+}
+
 async function start(port: number | undefined, allowOrigins: string[]): Promise<void> {
   const bridge = await startBridge({
     version: VERSION,
     distribution: "cli",
     overrides: { port, allowOrigins },
-    listener: { code: announceCode, locked: announceLocked, connectors: announceConnectors },
+    listener: {
+      code: announceCode,
+      locked: announceLocked,
+      connectors: announceConnectors,
+      generation: announceGeneration,
+    },
   }).catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);

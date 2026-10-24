@@ -1,0 +1,21 @@
+{
+  "result": "pages",
+  "format": "flyer",
+  "sizes": [
+    {
+      "id": "5:7",
+      "label": "Flyer 5:7",
+      "width": 1000,
+      "height": 1400
+    }
+  ],
+  "pages": [
+    "flyer"
+  ],
+  "outputs": [
+    "png",
+    "pdf"
+  ],
+  "fixed_size": false,
+  "required_parts": []
+}
