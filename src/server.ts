@@ -1,30 +1,37 @@
 /**
- * HTTP API (all JSON is snake_case on the wire):
- *   GET    /v1/health                    → { name, version, paired, busy, connectors }
+ * HTTP API (docs/gateway.md §5; all JSON is snake_case on the wire):
+ *   GET    /v1/health                    → { name, version, paired, busy }
  *   POST   /v1/pair/start                → { expires_at }       shows a code in the terminal or app
  *   POST   /v1/pair/confirm  { code }    → { token }
  *   DELETE /v1/pair                      → 204                  revokes the caller's token
- *   POST   /v1/runs  { prompt, session_id?, title? }  → { run_id, session_id, assistant_message_id, stream }
- *   POST   /v1/briefings                 → { run_id, stream }   today's Daily Briefing, as an agent run
- *   POST   /v1/calendar/weeks  { week_start }  → { run_id, stream }   one Mon–Fri week of Google Calendar
- *   POST   /v1/mail/triage  { days? }    → { run_id, stream }   the last days of Gmail, triaged
- *   GET    /v1/runs/:id/result           → { briefing } | { week } | { triage }  what a finished report run produced
+ *   GET    /v1/capabilities              → { bridge_version, time_zone, default_provider, providers, limits }
+ *   POST   /v1/runs  { prompt, provider?, model?, system_prompt?, session?, connectors?, workspace_tools?,
+ *                      output_schema?, limits? }  → { run_id, session_id, provider, stream }
+ *   GET    /v1/runs/:id                  → { run_id, session_id, provider, status, output, text, error }
  *   POST   /v1/runs/:id/tickets          → stream               a fresh ticket for the same run
  *   POST   /v1/runs/:id/cancel           → 202
- *   GET    /v1/runs/:id/stream?ticket=   → text/event-stream
- * `stream` is Seleya's ChatStream: { stream_id, ticket, expires_at, url }.
+ *   GET    /v1/runs/:id/stream?ticket=   → text/event-stream    the run's events (§6)
+ * `stream` is Seleya's ChatStream: { stream_id, ticket, expires_at, url }. Every endpoint but health, pairing
+ * and stream needs `Authorization: Bearer <token>`; a run or session of another paired browser looks like it
+ * doesn't exist.
  */
+import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { z } from "zod";
 
-import { canBrief, runBriefing } from "./briefing.ts";
-import { canReadCalendar, parseWeekStart, runCalendarWeek } from "./calendar.ts";
-import { runClaude } from "./claude.ts";
+import { verbatim } from "./case.ts";
 import type { BridgeConfig } from "./config.ts";
-import type { ConnectorSet } from "./connectors.ts";
+import { runOnce } from "./engine/engine.ts";
+import {
+  buildRunSpec,
+  MAX_OUTPUT_SCHEMA_BYTES,
+  MAX_PROMPT_CHARS,
+  MAX_SYSTEM_PROMPT_CHARS,
+  runRequestSchema,
+} from "./engine/policy.ts";
+import type { ProviderAdapter, ProviderId } from "./engine/types.ts";
 import { HttpError, readJson, sendEmpty, sendError, sendJson } from "./http.ts";
-import { canReadMail, DEFAULT_DAYS, MAX_DAYS, MIN_DAYS, runMailTriage } from "./mail.ts";
 import type { Pairing, TokenStore } from "./pairing.ts";
 import { RunRegistry, type Run } from "./runs.ts";
 import type { SessionStore } from "./sessions.ts";
@@ -39,37 +46,32 @@ import {
 import { streamRun } from "./sse.ts";
 import { TicketStore } from "./tickets.ts";
 
-const MAX_PROMPT_LENGTH = 100_000;
-const TITLE_LENGTH = 60;
-
 const confirmSchema = z.object({ code: z.string().regex(/^\d{6}$/, "must be 6 digits") });
-const runSchema = z.object({
-  prompt: z.string().trim().min(1).max(MAX_PROMPT_LENGTH),
-  /** An earlier run's session_id continues that conversation; omit to start a new one. */
-  session_id: z.uuid().optional(),
-  title: z.string().trim().min(1).max(200).optional(),
-});
-
-const calendarWeekSchema = z.object({ week_start: z.string() });
-const mailTriageSchema = z.object({ days: z.number().int().min(MIN_DAYS).max(MAX_DAYS).default(DEFAULT_DAYS) });
 
 export interface BridgeDeps {
   config: BridgeConfig;
   version: string;
   tokens: TokenStore;
   pairing: Pairing;
-  /** Which paired browser started each chat conversation. */
+  /** Which paired browser started each persisted conversation, with which provider. */
   sessions: SessionStore;
-  /** The connectors runs may read from; empty until discovery finishes. */
-  connectors: () => ConnectorSet;
-  /** Claude started or finished answering a request. */
+  /** The providers runs may use, by id; their status() is what /v1/capabilities shows. */
+  providers: Map<ProviderId, ProviderAdapter>;
+  /** A provider started or finished answering a request. */
   onBusyChange?: (busy: boolean) => void;
 }
 
-const titleFrom = (prompt: string) => {
-  const line = prompt.split("\n", 1)[0]?.trim() ?? "";
-  return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1)}…` : line || "New chat";
-};
+/**
+ * The engine finishes every run itself; this only catches a bug in it, so a run that threw still ends
+ * and the bridge doesn't stay busy forever.
+ */
+function finishCrashed(run: Run, error: unknown): void {
+  console.error(error);
+  if (run.finished) return;
+  run.error = { code: "provider_error", message: "The bridge failed while running this request", retryable: true };
+  run.emit("run.failed", run.error);
+  run.emit("stream.done", {});
+}
 
 export function createBridgeServer({
   config,
@@ -77,7 +79,7 @@ export function createBridgeServer({
   tokens,
   pairing,
   sessions,
-  connectors,
+  providers,
   onBusyChange,
 }: BridgeDeps): {
   server: Server;
@@ -130,8 +132,6 @@ export function createBridgeServer({
         version,
         paired: token !== undefined && tokens.find(token, origin) !== undefined,
         busy: runs.busy,
-        // Which connectors Claude can read from; tools and errors stay in the bridge's terminal or app.
-        connectors: connectors().connectors.map(({ id, name, state }) => ({ id, name, state })),
       });
     }
 
@@ -161,75 +161,62 @@ export function createBridgeServer({
       return sendEmpty(res, 204);
     }
 
+    // Needs a token: unlike health, it shows tools and models.
+    if (method === "GET" && url.pathname === "/v1/capabilities") {
+      authorize(req, origin);
+      return sendJson(res, 200, {
+        bridgeVersion: version,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        defaultProvider: config.defaultProvider,
+        providers: [...providers.values()].map((adapter) => {
+          const status = adapter.status();
+          return { ...status, detail: status.detail ?? null };
+        }),
+        limits: {
+          maxTurns: config.limits.maxTurns,
+          maxToolOutputTokens: config.limits.maxToolOutputTokens,
+          maxPromptChars: MAX_PROMPT_CHARS,
+          maxSystemPromptChars: MAX_SYSTEM_PROMPT_CHARS,
+          maxOutputSchemaBytes: MAX_OUTPUT_SCHEMA_BYTES,
+        },
+      });
+    }
+
     if (method === "POST" && url.pathname === "/v1/runs") {
       const owner = authorize(req, origin).id;
-      const body = await readJson(req, runSchema);
-      if (body.session_id !== undefined && !sessions.owns(body.session_id, owner))
-        throw new HttpError(404, "conversation_not_found", "No such conversation for this browser");
-      if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
-      const run = runs.create(body.session_id ?? crypto.randomUUID(), owner);
-      if (body.session_id === undefined) sessions.add(run.sessionId, owner);
-      void runClaude(
-        run,
-        { prompt: body.prompt, resume: body.session_id !== undefined, title: body.title ?? titleFrom(body.prompt) },
+      const body = await readJson(req, runRequestSchema);
+      // From here to runs.create nothing is awaited, so two requests can't both pass the busy check (§8.4).
+      const { spec, provider, adapter, persisted } = buildRunSpec(body, {
         config,
-        version,
-        connectors(),
-      );
+        providers,
+        sessions,
+        ownerId: owner,
+        newId: randomUUID,
+      });
+      if (runs.busy) throw new HttpError(409, "busy", "Another request is still running");
+      // Recorded before the run exists: if writing sessions.json throws, no run is left holding `busy`.
+      if (persisted && !spec.session.resume) sessions.add(spec.session.id, owner, provider);
+      const run = runs.create({ sessionId: spec.session.id, persisted, ownerId: owner, provider });
+      runOnce(adapter, run, spec).catch((error: unknown) => finishCrashed(run, error));
       return sendJson(res, 201, {
         runId: run.id,
-        sessionId: run.sessionId,
-        assistantMessageId: run.assistantMessageId,
+        sessionId: persisted ? run.sessionId : null,
+        provider,
         stream: streamFor(run),
       });
     }
 
-    if (method === "POST" && url.pathname === "/v1/briefings") {
-      const owner = authorize(req, origin).id;
-      if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
-      const available = connectors();
-      if (!canBrief(available))
-        throw new HttpError(
-          409,
-          "no_connectors",
-          "No connectors to read yet. Connect Gmail, Google Calendar, Slack or GitHub in Claude, set connectors in the bridge's config.json, then restart it.",
-        );
-      const run = runs.create(crypto.randomUUID(), owner);
-      void runBriefing(run, config, version, available);
-      return sendJson(res, 201, { runId: run.id, stream: streamFor(run) });
-    }
-
-    if (method === "POST" && url.pathname === "/v1/calendar/weeks") {
-      const owner = authorize(req, origin).id;
-      const week = parseWeekStart((await readJson(req, calendarWeekSchema)).week_start);
-      if ("error" in week) throw new HttpError(400, "invalid_week", week.error);
-      if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
-      const available = connectors();
-      if (!canReadCalendar(available))
-        throw new HttpError(
-          409,
-          "no_calendar",
-          "Google Calendar isn't connected. Connect it in Claude, add it to connectors in the bridge's config.json, then restart it.",
-        );
-      const run = runs.create(crypto.randomUUID(), owner);
-      void runCalendarWeek(run, config, version, available, week.monday);
-      return sendJson(res, 201, { runId: run.id, stream: streamFor(run) });
-    }
-
-    if (method === "POST" && url.pathname === "/v1/mail/triage") {
-      const owner = authorize(req, origin).id;
-      const { days } = await readJson(req, mailTriageSchema);
-      if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
-      const available = connectors();
-      if (!canReadMail(available))
-        throw new HttpError(
-          409,
-          "no_gmail",
-          "Gmail isn't connected. Connect it in Claude, add it to connectors in the bridge's config.json, then restart it.",
-        );
-      const run = runs.create(crypto.randomUUID(), owner);
-      void runMailTriage(run, config, version, available, days);
-      return sendJson(res, 201, { runId: run.id, stream: streamFor(run) });
+    if (method === "GET" && parts[0] === "v1" && parts[1] === "runs" && parts[2] && parts.length === 3) {
+      const run = runOr404(parts[2], authorize(req, origin).id);
+      return sendJson(res, 200, {
+        runId: run.id,
+        sessionId: run.persisted ? run.sessionId : null,
+        provider: run.provider,
+        status: run.status,
+        output: verbatim(run.output ?? null),
+        text: run.text ?? null,
+        error: run.error ?? null,
+      });
     }
 
     if (parts[0] === "v1" && parts[1] === "runs" && parts[2] && parts.length === 4) {
@@ -247,14 +234,6 @@ export function createBridgeServer({
       }
       if (method === "POST" && action === "tickets") {
         return sendJson(res, 200, streamFor(runOr404(runId, authorize(req, origin).id)));
-      }
-      if (method === "GET" && action === "result") {
-        const run = runOr404(runId, authorize(req, origin).id);
-        if (!run.result)
-          throw run.finished
-            ? new HttpError(404, "no_result", "This run ended without a result")
-            : new HttpError(409, "not_ready", "Still running");
-        return sendJson(res, 200, { [run.result.key]: run.result.value });
       }
       if (method === "POST" && action === "cancel") {
         runOr404(runId, authorize(req, origin).id).abort.abort();

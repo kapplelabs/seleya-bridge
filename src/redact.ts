@@ -182,7 +182,10 @@ export class Redactor {
     return output.replace(/\s*<\[email\]>/g, "");
   }
 
-  /** Deep copy of a JSON-like value with every string redacted and credential fields blanked. */
+  /**
+   * Deep copy of a JSON-like value with every string redacted, keys included, and credential fields
+   * blanked.
+   */
   value(input: unknown): unknown {
     return this.walk(input);
   }
@@ -191,15 +194,30 @@ export class Redactor {
     if (typeof input === "string") return this.text(input);
     if (Array.isArray(input)) return input.map((item) => this.walk(item));
     if (typeof input !== "object" || input === null) return input;
-    const result: Record<string, unknown> = {};
+    const result = new Map<string, unknown>();
     for (const [key, field] of Object.entries(input)) {
-      if (SECRET_KEY.test(key) && field !== null && field !== "") {
-        this.add("secret");
-        result[key] = placeholder("secret");
-      } else {
-        result[key] = this.walk(field);
+      if (SECRET_KEY.test(key)) {
+        // A credential's name is not itself sensitive: the key stays, its value goes.
+        const blank = field === null || field === "";
+        if (!blank) this.add("secret");
+        result.set(uniqueKey(result, key), blank ? field : placeholder("secret"));
+        continue;
       }
+      // A map-shaped output ("sender → count") can put an address or a token in a key.
+      result.set(uniqueKey(result, this.text(key)), this.walk(field));
     }
-    return result;
+    // fromEntries defines own properties, so a "__proto__" key can't change the copy's prototype.
+    return Object.fromEntries(result);
   }
+}
+
+/**
+ * Keys that redact to the same text ("a@x.com" and "b@y.com" → "[email]") are kept apart as
+ * "[email]", "[email] (2)", "[email] (3)"…: the values stay, in order, and a reader still sees how many.
+ */
+function uniqueKey(taken: Map<string, unknown>, key: string): string {
+  if (!taken.has(key)) return key;
+  let n = 2;
+  while (taken.has(`${key} (${n})`)) n++;
+  return `${key} (${n})`;
 }

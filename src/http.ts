@@ -10,11 +10,14 @@ const MAX_BODY_BYTES = 1024 * 1024;
 export class HttpError extends Error {
   readonly status: number;
   readonly code: string;
+  /** What Seleya needs to explain the error, besides the code (`{provider, state}`, `{connector}`…). */
+  readonly details: Record<string, unknown> | undefined;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -29,7 +32,7 @@ export function sendJson(res: ServerResponse, status: number, body: unknown): vo
 }
 
 export function sendError(res: ServerResponse, error: HttpError): void {
-  sendJson(res, error.status, { error: { code: error.code, message: error.message } });
+  sendJson(res, error.status, { error: { code: error.code, message: error.message, details: error.details } });
 }
 
 export function sendEmpty(res: ServerResponse, status: number): void {

@@ -2,14 +2,14 @@
  * claude.ai connectors (Gmail, Google Calendar, Slack…) for web requests, read-only.
  *
  * Connectors belong to the claude.ai account Claude Code is signed in with, and only a session that loads
- * the user's settings lists them. Web runs never load those settings (see claude.ts), so the bridge looks
+ * the user's settings lists them. Runs never load those settings (see adapter.ts), so the bridge looks
  * the configured connectors up once, in a discovery session that sends no prompt and has no tools, and
  * keeps each one's `claudeai-proxy` config. Every run then gets exactly those servers, keyed by Seleya
  * connector id (`mcp__gmail__search_threads`), with the read-only tools allowed and every other tool removed.
  */
 import { query, type McpServerStatus, type McpServerStatusConfig } from "@anthropic-ai/claude-agent-sdk";
 
-import type { BridgeConfig } from "./config.ts";
+import type { BridgeConfig } from "../../config.ts";
 
 const DISCOVERY_TIMEOUT_MS = 30_000;
 const POLL_MS = 1_000;
@@ -17,7 +17,7 @@ const POLL_MS = 1_000;
 export type ConnectorState = "connected" | "unavailable";
 
 export interface ConnectorInfo {
-  /** Seleya connector id, the key in config.connectors and in tool names. */
+  /** Connector id, the key in config.connectors and in tool names. */
   id: string;
   /** claude.ai connector name, e.g. "Google Calendar". */
   name: string;
@@ -53,10 +53,11 @@ const CLAUDE_AI_PREFIX = "claude.ai ";
 const claudeAiName = (name: string) => `${CLAUDE_AI_PREFIX}${name}`;
 
 /**
- * Seleya connector ids for claude.ai connector names, so Seleya shows its own name and icon. Connectors
- * not listed here get an id made from their name (Google Sheets → google_sheets).
+ * Connector ids for claude.ai connector names. An id is part of every tool name a saved conversation
+ * refers to, so these never change. Connectors not listed here get an id made from their name
+ * (Google Sheets → google_sheets).
  */
-const SELEYA_IDS: Record<string, string> = {
+const CONNECTOR_IDS: Record<string, string> = {
   Gmail: "gmail",
   "Google Calendar": "calendar",
   "Google Drive": "drive",
@@ -115,14 +116,22 @@ function idFromName(name: string): string {
 export const wantsConnectors = (config: BridgeConfig) =>
   config.connectors === "auto" || Object.keys(config.connectors).length > 0;
 
-/** Every connected claude.ai connector, by Seleya connector id (ids made unique). */
-function connectedConnectors(statuses: McpServerStatus[]): [string, string][] {
+const bareName = (status: McpServerStatus) =>
+  status.name.startsWith(CLAUDE_AI_PREFIX) ? status.name.slice(CLAUDE_AI_PREFIX.length) : status.name;
+
+/**
+ * Every connected claude.ai connector, by connector id (ids made unique). Sorted by name first: discovery
+ * order varies, and a `_2` suffix must land on the same connector after every restart.
+ */
+export function connectedConnectors(statuses: McpServerStatus[]): [string, string][] {
   const used = new Set<string>();
   const result: [string, string][] = [];
-  for (const status of statuses) {
-    if (!isClaudeAi(status) || status.status !== "connected") continue;
-    const name = status.name.startsWith(CLAUDE_AI_PREFIX) ? status.name.slice(CLAUDE_AI_PREFIX.length) : status.name;
-    const base = SELEYA_IDS[name] ?? idFromName(name);
+  const names = statuses
+    .filter((status) => isClaudeAi(status) && status.status === "connected")
+    .map(bareName)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (const name of names) {
+    const base = CONNECTOR_IDS[name] ?? idFromName(name);
     let id = base;
     for (let n = 2; used.has(id); n++) id = `${base}_${n}`;
     used.add(id);

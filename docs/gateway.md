@@ -222,7 +222,7 @@ trông như không tồn tại.
   "workspace_tools": [],               // hoặc "all"; mặc định []
   "output_schema": { /* JSON Schema draft-7 */ },   // tuỳ chọn; có thì run trả structured output
 
-  "limits": {                          // tuỳ chọn; kẹp trong [1, trần của capabilities.limits]
+  "limits": {                          // tuỳ chọn; kẹp trong [1, trần]; max_turns bỏ trống = trần, để run luôn có giới hạn
     "max_turns": 40,
     "max_tool_output_tokens": 60000
   }
@@ -462,7 +462,9 @@ Bridge luôn ghép:
 
 Phần mở đầu (không đổi theo tính năng, chỉ đổi theo bridge):
 
-- Model đang chạy trên máy người dùng, qua một cổng nối; ngày giờ và múi giờ hiện tại.
+- Model đang chạy trên máy người dùng, qua một cổng nối; ngày hiện tại và múi giờ. Chỉ có ngày, không có
+  giờ: phần mở đầu nằm đầu system prompt, một giá trị đổi mỗi phút sẽ làm provider không cache được phần
+  còn lại.
 - Nếu run có connector: danh sách connector, chúng **chỉ đọc**, và `PRIVACY_RULES`.
 - Nếu run không có connector: "No connectors are available."
 

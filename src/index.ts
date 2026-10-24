@@ -11,7 +11,7 @@ import { parseArgs } from "node:util";
 
 import { startBridge } from "./bridge.ts";
 import { bridgeHome, configPath, isLoopbackOrigin } from "./config.ts";
-import type { ConnectorSet } from "./connectors.ts";
+import type { ConnectorSet } from "./providers/claude/connectors.ts";
 import { TokenStore, type PairingCode } from "./pairing.ts";
 
 const pkg: unknown = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));

@@ -1,10 +1,13 @@
 # seleya-bridge
 
-A small local server that lets Seleya web — including the deployed site — send requests to Claude Code on
-your own machine. The browser can't start `claude` itself, so the bridge does it: it listens on
-`127.0.0.1`, runs each prompt through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk), and
-streams the answer back as the same `seleya.*` SSE events ms-agent-gateway emits, so Seleya's chat
-stream reads it unchanged.
+A small local gateway that lets Seleya web — including the deployed site — run AI agents on your own
+machine. The browser can't start `claude` itself, so the bridge does it: it listens on `127.0.0.1`, runs
+each request through a provider (Claude Code, via the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk)),
+and streams provider-neutral SSE events back.
+
+The bridge holds no product logic: prompts, output schemas and what Seleya does with the result live in
+Seleya. The bridge keeps what must be enforced on this machine: pairing, isolation, read-only connectors,
+redaction, limits and one run at a time. The design is in [docs/gateway.md](docs/gateway.md).
 
 ```
 Seleya (browser) ──HTTPS page, fetch/EventSource──▶ seleya-bridge (127.0.0.1:47821) ──▶ Claude Code
@@ -79,6 +82,9 @@ first run:
 | `workspace` | `~/seleya-workspace` | Claude's working directory |
 | `tools` | `["Read", "Glob", "Grep"]` | Built-in tools Claude may use; others don't exist for it |
 | `model` | Claude Code's default | Model override |
+| `models` | `[]` | Other Claude models a request may ask for |
+| `defaultProvider` | `"claude"` | Provider of a run whose request names none |
+| `limits` | `{ "maxTurns": 60, "maxToolOutputTokens": 100000 }` | Ceilings on what one run may ask for |
 | `claudeExecutable` | bundled with the SDK | Path to a `claude` binary, e.g. `~/.local/bin/claude` |
 | `connectors` | `{}` | claude.ai connectors Claude may read from: `"auto"` or a map by Seleya connector id (see below) |
 
@@ -116,73 +122,32 @@ connectors: tools the connector marks read-only run without asking, and every ot
 update, delete…) is removed, so Claude can't call it. A listed connector that isn't connected on claude.ai
 is reported as unavailable and left out.
 
-## Daily Briefing
+## Runs
 
-`POST /v1/briefings` runs one Claude turn with the bridge's own prompt (the web can't change it) and only the
-connectors' read-only tools — no file tools. Claude reads today's calendar, the last day's mail and chat
-mentions, pull requests waiting on the user, and the user's open Jira issues (Atlassian connector, JQL
-`assignee = currentUser() AND statusCategory != Done`), sorted into *focus* (in progress, blocked, overdue,
-highest priority), *to do* and *ready to ship* (waiting for review, QA, release or deployment). It returns
-the briefing as structured output
-(a JSON schema, validated with zod). The stream carries Seleya's agent run events instead of chat events:
+Every request is a run: `POST /v1/runs` with the prompt, an optional system prompt (added after the
+bridge's own preamble: date, time zone, the run's connectors and privacy rules), the connectors and
+workspace tools it may use (only within `connectors` and `tools`), an optional JSON Schema for a
+structured answer, and limits (clamped to `limits`). Chat, the Daily Briefing, the Calendar and Mail
+assistants are all runs whose prompts and schemas Seleya sends; adding or changing one needs no new
+bridge.
 
-| Event | When |
-|---|---|
-| `seleya.run.started` / `seleya.run.phase` | First, then whenever the kind of work changes (`processing`, `thinking`, `reasoning`, `tool`, `writing`) |
-| `seleya.thought.started` / `.delta` / `.completed` | Each thinking or text block, sent whole once it ends (so it is redacted as a whole) |
-| `seleya.trace.step` | Connector calls (`active` → `done` / `failed`) |
-| `seleya.run.completed` | With a summary such as "Read 4 sources · removed 12 private details"; the briefing is then at `GET /v1/runs/:id/result` |
-| `seleya.error` | `stopped`, `no_result`, `invalid_briefing`, `claude_auth_required`, `connector_failed` (every connector call failed, e.g. a connector authorized without read permission), … |
-| `stream.done` | Always last |
-
-The briefing is kept with the run (10 minutes); Seleya stores the latest one in the browser.
-
-## Calendar Assistant
-
-`POST /v1/calendar/weeks` with `{ "week_start": "YYYY-MM-DD" }` (a Monday, from 4 weeks back to 8 ahead) runs
-one Claude turn that reads that Monday–Friday from Google Calendar and returns its events as structured
-output: title, local date and times, all-day, guest count, whether the user organizes it, kind (meeting,
-focus, personal, out-of-office), the user's reply and a room or "Video call". Declined and cancelled
-events are left out, and so are descriptions, attendee names and links.
-
-It's a report run like the Daily Briefing (same events, same redaction), with two differences: Claude only
-gets the Google Calendar connector (`calendar`) and its read-only tools, and the result is
-`GET /v1/runs/:id/result` → `{ week }`. It answers `409 no_calendar` when Google Calendar isn't connected.
-Seleya works out the week's stats, conflicts, free time and focus suggestions from the events; it can't
-change the calendar, so the user makes changes in Google Calendar.
-
-## Mail Assistant
-
-`POST /v1/mail/triage` with `{ "days": 2 }` (1–7, default 2) runs one Claude turn that reads that many days
-of the Gmail inbox, plus the last 14 days of sent mail, and returns a triage as structured output:
-
-- `respond`: threads where someone expects an answer, with why they were flagged, the last messages
-  (without signatures or quoted history) and a reply drafted in the user's voice, its confidence and the
-  commitments it makes (`checks`); `draft` is `null` when Claude can't answer from the thread.
-- `awaiting`: sent mail that asked for something and got no reply, with a drafted follow-up.
-- `invites`: meeting invitations still waiting for an answer, with a suggested answer and both drafts.
-- `bundles`: everything else grouped by sender or tool (`fyi`, `notifications`, `marketing`).
-
-Same events and redaction as the other report runs, with only the Gmail connector (`gmail`) and its
-read-only tools: nothing is sent, drafted in Gmail, labelled or archived. Security, sign-in, payment,
-salary, health, HR and legal mail is skipped entirely, people are named by display name only, and a Gmail
-thread id is kept only when it looks like one (Seleya links to the thread with it). The result is
-`GET /v1/runs/:id/result` → `{ triage }`; `409 no_gmail` when Gmail isn't connected.
+A run keeps no transcript unless `session.persist` is set. A persisted conversation gets a session id
+from the bridge, which only the browser that started it can continue (`session.resume_id`).
 
 ## Personal and secret data
 
 Connector content is redacted before anything else sees it (`src/redact.ts`):
 
-- **Before Claude reads it.** A `PostToolUse` hook rewrites every connector result (chat and briefing runs):
+- **Before Claude reads it.** A `PostToolUse` hook rewrites every connector result:
   email addresses, phone numbers, credentials (private keys, JWTs, bearer tokens, API keys of common
   providers, `password:` / `token=` values, sign-in codes), card numbers (Luhn-checked), IBANs, SSNs and
   passport / national-id / account numbers, IP addresses, and links that grant access (meeting joins,
   webhooks, credentials in the URL; sensitive query parameters are dropped from other links) become
   placeholders such as `[email]` or `[secret]`. JSON fields named like credentials are blanked.
-- **In what Claude is told.** Runs with connectors are told never to repeat such data; the briefing prompt
-  also has Claude skip security alerts, payment, salary, health, HR and legal mail entirely.
-- **In what leaves the bridge.** Trace step details (search queries), briefing thoughts and the briefing
-  itself are redacted again, and the count of removed values is reported.
+- **In what Claude is told.** Runs with connectors are told never to repeat such data.
+- **In what leaves the bridge.** Answer text (streamed a line at a time, so no value is split between two
+  events), thinking, tool inputs and errors, and the structured output (keys and values) are redacted
+  again, and the count of removed values is reported.
 
 People's display names are kept: a briefing needs to say who is waiting on you. The rules are patterns, a
 safety net rather than a guarantee.
@@ -203,16 +168,15 @@ Every page you open can send requests to `127.0.0.1`, and Claude Code can act on
   paired it: a request without that `Origin` header isn't authorized. A token unused for 30 days stops
   working.
 - **Ownership.** A run, its stream tickets and its result belong to the paired browser that started it;
-  others get `404`. A conversation (`session_id`) can only be continued by the browser that started it
-  (`sessions.json`), never a Claude Code session started some other way.
+  others get `404`. Session ids are always the bridge's, and a conversation can only be continued by the
+  browser that started it, with the same provider (`sessions.json`), never a Claude Code session started
+  some other way.
 - **Stream tickets.** `EventSource` can't send headers, so the SSE URL carries a ticket bound to one run,
   valid 60 seconds and 5 connections (enough for the browser's own reconnects).
-- **Redacted answers.** Chat answers are redacted like connector content before they leave the bridge:
-  text is streamed a line at a time so no value is split, and the completed message is redacted whole.
 - **Isolated Claude.** No `~/.claude` settings, hooks, MCP servers or skills are loaded, so your personal
-  permission rules never apply to web requests. Only `tools` and the read-only tools of `connectors`
-  exist, permission mode is `default`, and any call that would need approval is denied (an approval flow
-  comes later). One run at a time.
+  permission rules never apply to web requests. Only the workspace tools and connectors a run asks for,
+  within `tools` and `connectors`, exist (connectors read-only), permission mode is `default`, and any call
+  that would need approval is denied (an approval flow comes later). One run at a time.
 
 Browsers: Chrome, Edge and Firefox treat `http://127.0.0.1` as a secure context, so an HTTPS page can call
 it. Chrome may ask once for local network access (the bridge answers the
@@ -220,26 +184,42 @@ it. Chrome may ask once for local network access (the bridge answers the
 
 ## HTTP API
 
-JSON is snake_case on the wire. Errors are `{ "error": { "code", "message" } }`.
+JSON is snake_case on the wire. Errors are `{ "error": { "code", "message", "details"? } }`; `message` is
+for debugging, Seleya shows its own words for each `code`.
 
 | Method & path | Auth | Body | Response |
 |---|---|---|---|
-| `GET /v1/health` | optional | | `{ name, version, paired, busy, connectors: [{ id, name, state }] }` (`paired` is whether the sent token is valid for the sending origin) |
+| `GET /v1/health` | optional | | `{ name, version, paired, busy }` (`paired` is whether the sent token is valid for the sending origin) |
 | `POST /v1/pair/start` | Origin | | `{ expires_at }`; `429 too_many_requests` within 3 s of the last code, `429 pairing_locked` after too many wrong codes |
 | `POST /v1/pair/confirm` | Origin | `{ code }` | `{ token }`; `401 invalid_code` |
 | `DELETE /v1/pair` | Bearer | | `204`, revokes the caller's token |
-| `POST /v1/runs` | Bearer | `{ prompt, session_id?, title? }` | `201 { run_id, session_id, assistant_message_id, stream }`; `404 conversation_not_found`, `409 busy` |
-| `POST /v1/briefings` | Bearer | | `201 { run_id, stream }`: today's Daily Briefing as an agent run; `409 busy`, `409 no_connectors` |
-| `POST /v1/calendar/weeks` | Bearer | `{ week_start }` | `201 { run_id, stream }`: one Mon–Fri week of Google Calendar; `400 invalid_week`, `409 busy`, `409 no_calendar` |
-| `POST /v1/mail/triage` | Bearer | `{ days? }` | `201 { run_id, stream }`: the last 1–7 days of Gmail, triaged; `409 busy`, `409 no_gmail` |
-| `GET /v1/runs/:id/result` | Bearer | | `{ briefing }`, `{ week }` or `{ triage }` once a report run completed; `409 not_ready`, `404 no_result` |
+| `GET /v1/capabilities` | Bearer | | `{ bridge_version, time_zone, default_provider, providers: [{ id, state, models, features, connectors_state, connectors }], limits }` |
+| `POST /v1/runs` | Bearer | see below | `201 { run_id, session_id, provider, stream }` |
+| `GET /v1/runs/:id` | Bearer | | `{ run_id, session_id, provider, status, output, text, error }` |
 | `POST /v1/runs/:id/tickets` | Bearer | | `stream` with a fresh ticket |
 | `POST /v1/runs/:id/cancel` | Bearer | | `202` |
 | `GET /v1/runs/:id/stream?ticket=` | ticket | | `text/event-stream` |
 
-`stream` is Seleya's `ChatStream`: `{ stream_id, ticket, expires_at, url }`. `session_id` is the Claude
-Code session, Seleya's conversation id: send it back to continue the conversation; omit it to start a new
-one.
+`POST /v1/runs` body:
+
+```jsonc
+{
+  "provider": "claude",                 // optional, default defaultProvider
+  "model": null,                        // optional, one of capabilities' models
+  "prompt": "…",
+  "system_prompt": "…",                 // optional, after the bridge's preamble
+  "session": { "persist": true, "resume_id": "…", "title": "…" },   // optional; no transcript without persist
+  "connectors": ["calendar"],           // or "all"; default none
+  "workspace_tools": ["read_file"],     // or "all"; default none
+  "output_schema": { "type": "object" },// optional JSON Schema (draft-7): the answer comes back as `output`
+  "limits": { "max_turns": 40, "max_tool_output_tokens": 60000 }
+}
+```
+
+It answers `400 invalid_request` / `invalid_output_schema`, `404 session_not_found`,
+`409 provider_unavailable` / `connectors_discovering` / `busy`, `422 model_not_allowed` /
+`connector_unavailable` / `tool_not_allowed`. `stream` is Seleya's `ChatStream`:
+`{ stream_id, ticket, expires_at, url }`. `session_id` is `null` for a run that isn't persisted.
 
 ### Stream events
 
@@ -249,9 +229,11 @@ resumes after that event; a new ticket replays the run from the start. Finished 
 
 | Event | When |
 |---|---|
-| `seleya.message.started` | First; `conversation_id` = Claude session id |
-| `seleya.block.started` / `seleya.block.delta` | Each text block Claude writes, streamed |
-| `seleya.trace.started` / `seleya.trace.step` / `seleya.trace.completed` | Tool calls (`active` → `done` / `failed`) |
-| `seleya.message.completed` | Success, with the full message |
-| `seleya.error` | `cancelled`, `claude_auth_required`, `claude_api_error`, `claude_error`, `error_max_turns`, … |
+| `run.started` | First, with the values the run really got (provider, connectors, workspace tools, limits…) |
+| `text.started` / `text.delta` / `text.completed` | Each text block, streamed a line at a time, redacted |
+| `thinking.started` / `thinking.delta` / `thinking.completed` | Each thinking block, sent whole once it ends, redacted |
+| `tool.started` / `tool.completed` | Tool calls: `kind` (`connector`, `workspace`, `other`), `connector`, `name`, redacted `input`; then `ok` and `error` |
+| `output.started` | The model started writing the structured answer |
+| `run.completed` | `{ text, output?, sources, connector_errors, redactions, usage?, duration_ms }` |
+| `run.failed` | `{ code, message, retryable, details? }`: `provider_auth_required`, `provider_usage_limit`, `provider_api_error`, `context_limit`, `max_turns`, `invalid_output`, `no_result`, `cancelled`, `provider_error` |
 | `stream.done` | Always last |

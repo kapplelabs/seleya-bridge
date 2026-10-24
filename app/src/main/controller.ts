@@ -6,7 +6,7 @@ import { app } from "electron";
 
 import { PortInUseError, startBridge, type Bridge } from "../../../src/bridge.ts";
 import { bridgeHome, DEFAULT_PORT, readConfigFile, updateConfigFile, type ConfigFile } from "../../../src/config.ts";
-import type { ConnectorSet } from "../../../src/connectors.ts";
+import type { ConnectorSet } from "../../../src/providers/claude/connectors.ts";
 import { TokenStore, type PairingCode } from "../../../src/pairing.ts";
 import type { BridgeError, BridgeSettings, BridgeState, BridgeStatus, SaveResult } from "../shared/ipc.ts";
 
