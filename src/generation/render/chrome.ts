@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { printCopy } from "./print.ts";
+
 /**
  * One headless Chrome per runtime, driven over the DevTools protocol (research R1). Renders a design
  * page at an exact size to PNG and PDF and measures its text boxes, in a single page load.
@@ -202,7 +204,10 @@ export class ChromeRenderer {
     height: number,
     options: { pdf?: boolean; keepTogether?: string[] } = {},
   ): Promise<RenderResult> {
-    const job = this.queue.then(() => this.renderNow(file, width, height, options));
+    // A PDF prints from a copy whose large PNGs are JPEG (print.ts): Chrome stalls on them.
+    const job = this.queue.then(async () =>
+      this.renderNow(options.pdf ? await printCopy(file) : file, width, height, options),
+    );
     this.queue = job.catch(() => undefined);
     return job;
   }
@@ -214,27 +219,29 @@ export class ChromeRenderer {
     options: { pdf?: boolean; keepTogether?: string[] },
   ): Promise<RenderResult> {
     const cdp = await this.start();
-    const { targetId } = (await cdp.send("Target.createTarget", { url: "about:blank" })) as {
-      targetId: string;
-    };
-    const { sessionId } = (await cdp.send("Target.attachToTarget", {
-      targetId,
-      flatten: true,
-    })) as { sessionId: string };
     // Renders run one at a time, so a call Chrome never answers would block every later render
-    // (a deck's PDF once stalled for 14 min): each call gets a deadline, and the page is closed.
-    const send = (method: string, params: Record<string, unknown> = {}) =>
+    // (a deck's PDF once stalled for 14 min): every call gets a deadline, closing the page too.
+    let stalled = false;
+    const call = (method: string, params: Record<string, unknown> = {}, sessionId?: string) =>
       new Promise<unknown>((resolve, reject) => {
         const limitMs = method === "Page.printToPDF" ? 120_000 : 30_000;
-        const timer = setTimeout(
-          () => reject(new Error(`Chrome did not finish ${method} within ${limitMs / 1000} s`)),
-          limitMs,
-        );
+        const timer = setTimeout(() => {
+          stalled = true;
+          reject(new Error(`Chrome did not finish ${method} within ${limitMs / 1000} s`));
+        }, limitMs);
         cdp.send(method, params, sessionId).then(
           (value) => (clearTimeout(timer), resolve(value)),
           (error: unknown) => (clearTimeout(timer), reject(error)),
         );
       });
+    const { targetId } = (await call("Target.createTarget", { url: "about:blank" })) as {
+      targetId: string;
+    };
+    const { sessionId } = (await call("Target.attachToTarget", { targetId, flatten: true })) as {
+      sessionId: string;
+    };
+    const send = (method: string, params: Record<string, unknown> = {}) =>
+      call(method, params, sessionId);
     try {
       await send("Page.enable");
       await send("Emulation.setDeviceMetricsOverride", {
@@ -293,7 +300,10 @@ export class ChromeRenderer {
         pdf: pdf ? Buffer.from(pdf.data, "base64") : undefined,
       };
     } finally {
-      await cdp.send("Target.closeTarget", { targetId }).catch(() => undefined);
+      // A Chrome that stopped answering is restarted for the next render: closing its page would
+      // wait forever (a poster run once timed out this way after all its checks had passed).
+      if (stalled) await this.close();
+      else await call("Target.closeTarget", { targetId }).catch(() => this.close());
     }
   }
 
@@ -308,7 +318,8 @@ export class ChromeRenderer {
     height: number,
   ): Promise<Buffer> {
     const wrapper = path.join(folder, ".pages.html");
-    const frames = files
+    const printed = await Promise.all(files.map((file) => printCopy(file)));
+    const frames = printed
       .map(
         (file) =>
           `<iframe src="${pathToFileURL(file).href}" style="display:block;width:${width}px;height:${height}px;border:0;break-after:page"></iframe>`,
