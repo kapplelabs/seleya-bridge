@@ -73,6 +73,8 @@ export function plannedFor(
   steps: string[],
   request: Record<string, unknown>,
   settings?: Record<string, unknown>,
+  /** Media the skill uses: a design with no picture plans no picture step. */
+  needs: string[] = ["image"],
 ): string[] {
   const own =
     typeof request.edit_instruction === "string"
@@ -84,7 +86,7 @@ export function plannedFor(
   if (!own && settings?.pipeline === "spec")
     return settings.result === "deck"
       ? ["Writing the slides", "Rendering", "Checking the slides"]
-      : ["Designing", "Making the picture", "Rendering", "Checking the design"];
+      : ["Designing", ...(needs.includes("image") ? ["Making the picture"] : []), "Rendering", "Checking the design"];
   if (!own || !steps.includes("Rendering")) return steps;
   return [own, ...steps.filter((step) => step === "Rendering" || step.startsWith("Checking"))];
 }
@@ -144,7 +146,7 @@ export class RunManager {
    */
   create(input: CreateRunInput, retry?: RunRow, from?: RunRow): RunRow {
     const skill = this.skill(input.skill ?? "orchestrator", input.request);
-    const { planned, steps } = applyPlan(plannedFor(skill.plannedSteps, input.request, skill.settings), []);
+    const { planned, steps } = applyPlan(plannedFor(skill.plannedSteps, input.request, skill.settings, skill.needs), []);
     const run: RunRow = {
       id: this.newId(),
       title: input.title.trim() || skill.title,

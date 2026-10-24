@@ -43,10 +43,31 @@ export function pipelinePrompt(skill: SkillMeta, folder: string, request: Record
     "## The request",
     JSON.stringify(asked, null, 2),
     editContext(folder, request) ?? "",
+    correctedDefinition(folder, request),
     "Answer now with the JSON object only.",
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+/** A custom design whose definition the person corrected (spec 007 FR-005): design from exactly it. */
+function correctedDefinition(folder: string, request: Record<string, unknown>): string {
+  const file = path.join(folder, "out", "definition.json");
+  if (request.definition_edited !== true || !existsSync(file)) return "";
+  return [
+    "## The definition, corrected by the person",
+    "Use it exactly (size, pages, content, required parts); do not answer a new `definition`.",
+    "```json",
+    readFileSync(file, "utf8").trim(),
+    "```",
+  ].join("\n");
+}
+
+/** A custom design's size as soon as its definition states it in a partial answer. */
+export function earlySize(partial: string): { width: number; height: number } | undefined {
+  const width = Number(/"width_px"\s*:\s*(\d+)/.exec(partial)?.[1]);
+  const height = Number(/"height_px"\s*:\s*(\d+)/.exec(partial)?.[1]);
+  return width > 0 && height > 0 ? { width: Math.min(6000, width), height: Math.min(6000, height) } : undefined;
 }
 
 /** The JSON object in an answer (fences and stray text around it are ignored). */
@@ -132,9 +153,10 @@ async function drawInstead(
   pages: { html: string }[],
   description: string,
   reason: string,
+  size = context.size,
 ): Promise<boolean> {
   if (!context.drawPicture) return false;
-  const { folder, size } = context;
+  const { folder } = context;
   const concept = readJsonFile(path.join(folder, "out", "concept.json"));
   const palette = Array.isArray(concept?.palette) ? concept.palette.join(", ") : "the design's colours";
   const end = context.step("Drawing the picture");
@@ -159,6 +181,13 @@ async function drawInstead(
     end("failed", error instanceof Error ? error.message : String(error));
     return false;
   }
+}
+
+function sizeOfDefinition(definition: Record<string, unknown>): { width: number; height: number } | undefined {
+  const value = (definition.size ?? {}) as Record<string, unknown>;
+  const width = Math.min(6000, Number(value.width_px) || 0);
+  const height = Math.min(6000, Number(value.height_px) || 0);
+  return width && height ? { width, height } : undefined;
 }
 
 function readJsonFile(file: string): Record<string, unknown> | undefined {
@@ -197,8 +226,12 @@ export async function runCreativePipeline(
     await runEdit(context);
     return {};
   }
-  const { folder, size } = context;
+  const { folder } = context;
   const out = (name: string) => path.join(folder, "out", name);
+  // A custom design sets its own size in its definition, unless the person chose one.
+  const chosen = Number(context.request.width) > 0;
+  const corrected = readJsonFile(out("definition.json"));
+  let size = (!chosen && corrected && sizeOfDefinition(corrected)) || context.size;
 
   const endDesign = context.step("Designing");
   let picture: Promise<{ file?: string; reason?: string }> | undefined;
@@ -213,10 +246,17 @@ export async function runCreativePipeline(
   };
   const answer = answerJson(
     await context.ask(pipelinePrompt(context.skill, folder, context.request), (partial) => {
+      if (!chosen && !corrected) size = earlySize(partial) ?? size;
       const prompt = earlyImagePrompt(partial);
       if (prompt) startPicture(prompt);
     }),
   );
+  // The definition (custom designs): what Seleya checks the design against.
+  if (!corrected && answer.definition && typeof answer.definition === "object") {
+    writeFileSync(out("definition.json"), JSON.stringify(answer.definition, null, 2));
+    context.draft("out/definition.json", "definition");
+    if (!chosen) size = sizeOfDefinition(answer.definition as Record<string, unknown>) ?? size;
+  }
   startPicture(str(answer.image_prompt) ?? "");
 
   writeFileSync(out("brief.json"), JSON.stringify(answer.brief ?? {}, null, 2));
@@ -226,23 +266,34 @@ export async function runCreativePipeline(
     const value = (page ?? {}) as Record<string, unknown>;
     const name = (str(value.name) ?? "design").replace(/[^A-Za-z0-9_-]/g, "") || "design";
     const html = str(value.html);
-    return html ? [{ name, html: `out/${name}.html`, content: html }] : [];
+    // A page may have its own size (a custom design's panels); else the design's size.
+    const width = Math.min(6000, Number(value.width) || size.width);
+    const height = Math.min(6000, Number(value.height) || size.height);
+    return html ? [{ name, html: `out/${name}.html`, content: html, width, height }] : [];
   });
   if (pages.length === 0) throw new Error("the design has no page");
   for (const page of pages) {
     writeFileSync(path.join(folder, page.html), page.content);
     context.draft(page.html, page.name); // shown on its colours while the picture is being made
   }
+  // A vector deliverable (a logo): the SVG itself, cleaned like a drawn picture.
+  const vector = typeof answer.vector === "string" ? cleanSvg(answer.vector) : undefined;
+  if (vector) writeFileSync(out(`${pages[0]!.name}.svg`), vector);
   endDesign("done", str((answer.concept as Record<string, unknown> | undefined)?.title));
 
   const manifest = {
     skill: context.skill.name,
-    pages: pages.map(({ name, html }) => ({ name, html, width: size.width, height: size.height })),
+    pages: pages.map(({ name, html, width, height }) => ({ name, html, width, height })),
     keep_together: Array.isArray(answer.keep_together) ? answer.keep_together : [],
+    ...(vector ? { vector: `out/${pages[0]!.name}.svg` } : {}),
   };
   writeFileSync(out("result.json"), JSON.stringify(manifest));
   const pending = picture;
-  if (!pending) return {};
+  if (!pending) {
+    // The plan showed a picture step (the format may have one); this design chose none.
+    if (context.skill.needs.includes("image")) context.step("Making the picture")("done", "No picture for this design");
+    return {};
+  }
   const description = str(answer.image_prompt) ?? "";
   return {
     attachPicture: async () => {
@@ -253,7 +304,7 @@ export async function runCreativePipeline(
         return { placed: true };
       }
       const reason = made.reason ?? "no agent made it";
-      if (!(await drawInstead(context, manifest.pages, description, reason))) return { placed: false, reason };
+      if (!(await drawInstead(context, manifest.pages, description, reason, manifest.pages[0]))) return { placed: false, reason };
       context.draft(`out/${DRAWN}`, "visual");
       writeFileSync(out("result.json"), JSON.stringify({ ...manifest, visual: `out/${DRAWN}` }));
       return { placed: true, drawn: true, reason };
@@ -265,8 +316,11 @@ async function runEdit(context: PipelineContext): Promise<void> {
   const { folder } = context;
   const previous = JSON.parse(readFileSync(path.join(folder, PREVIOUS_RESULT), "utf8")) as {
     pages?: { name: string; html: string }[];
+    vector?: string;
   };
   const pages = previous.pages ?? [];
+  // A logo's words and shapes are in its vector: replacements apply there too, and a new one may come.
+  const vector = previous.vector ? path.join(folder, previous.vector) : undefined;
   const endEdit = context.step("Applying the edit");
   const answer = answerJson(
     await context.ask(pipelinePrompt(context.skill, folder, context.request), () => undefined),
@@ -289,6 +343,17 @@ async function runEdit(context: PipelineContext): Promise<void> {
       // Visible text only, never markup (spec 004 FR-018): an edit cannot break the page.
       const result = replaceText(readFileSync(file, "utf8"), replacements);
       writeFileSync(file, result.html);
+      changed += result.count;
+    }
+  }
+  if (vector && existsSync(vector)) {
+    const replaced = typeof answer.vector === "string" ? cleanSvg(answer.vector) : undefined;
+    if (replaced) {
+      writeFileSync(vector, replaced);
+      changed += 1;
+    } else if (replacements.length) {
+      const result = replaceText(readFileSync(vector, "utf8"), replacements);
+      writeFileSync(vector, result.html);
       changed += result.count;
     }
   }

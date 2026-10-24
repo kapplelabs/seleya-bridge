@@ -81,7 +81,11 @@ export function editContext(folder: string, request: Record<string, unknown>): s
     if (existsSync(file))
       lines.push("", `${page.html} (${page.width}×${page.height}):`, "```html", readFileSync(file, "utf8").trim(), "```");
   }
-  const manifest = readJson<unknown>(path.join(folder, PREVIOUS_RESULT));
+  const manifest = readJson<{ vector?: unknown }>(path.join(folder, PREVIOUS_RESULT));
+  // A vector deliverable (a logo): its words and shapes live in the SVG, not the page.
+  const vector = typeof manifest?.vector === "string" ? path.join(folder, manifest.vector) : undefined;
+  if (vector && existsSync(vector))
+    lines.push("", `${manifest!.vector as string} (the vector; change it by answering a new \`vector\`):`, "```svg", readFileSync(vector, "utf8").trim(), "```");
   if (manifest) lines.push("", "The previous out/result.json:", "```json", JSON.stringify(manifest), "```");
   return lines.join("\n");
 }

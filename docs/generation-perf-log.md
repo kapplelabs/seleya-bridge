@@ -247,3 +247,46 @@ Chi tiết lớp fallback:
   - `generationJson` bỏ qua `*.draft.*` (sửa luôn cho các run cũ đã lưu).
   - Test: "Studio shows a design's final picture, never its preview".
 - **Kiểm chứng:** tải lại Studio thì cùng run hiển thị `out/poster.png` có hình vẽ. 226 test pass.
+
+### Mọi usecase chuyển sang pipeline; skill viết lại theo research thiết kế (2026-10-24 21:xx)
+
+**Chuyển sang pipeline:** flyer, ad creative, social, business card, menu, logo, custom design (cùng poster và slides từ trước).
+- Engine bổ sung:
+  - `vector` (logo: SVG được làm sạch, lưu thành `logo.svg`, edit được);
+  - `definition` (custom: kích thước và trang lấy từ định nghĩa, kể cả định nghĩa do người dùng sửa);
+  - kích thước riêng cho từng trang;
+  - usecase không có ảnh thì không hiện bước "Making the picture" (custom chọn không ảnh thì bước đó đánh dấu "No picture for this design").
+
+**Đo** (dừng sớm theo yêu cầu, chênh lệch đã rõ):
+
+| Logo "Mây Tea" | Kết quả |
+|---|---|
+| Pipeline | 44 s, mọi check pass |
+| Agent loop | > 754 s chưa xong; 2 vòng sửa |
+
+**Skill viết lại theo research** (`seleya/catalog/DESIGN-GUIDELINES.md`, có nguồn: Google Ads, LinkedIn, Meta, WCAG, NN/g, Butterick, COLE, arXiv 2410.08885):
+- `CREATIVE-SPEC.md`:
+  - `concept.plan` (archetype, grid, scale, focal, reading_order) trước HTML;
+  - một điểm nhấn ≥ 3× chữ thường, ≤ 4 cỡ chữ, lề 5–8%, 30–40% khoảng trống;
+  - quy tắc dấu tiếng Việt (line-height), 11 font đã xác nhận có bộ tiếng Việt với Google Fonts (Bebas Neue không có);
+  - 60-30-10; danh sách dấu hiệu "AI-generic" bị cấm;
+  - chữ theo ngôn ngữ của request; cho phép nhãn chức năng ngắn, cấm bịa slogan hoặc thông tin;
+  - logo của brand kit không có trong run nên hiển thị tên thương hiệu bằng chữ.
+- Mỗi `SPEC.md` có: thứ bậc thông tin, cỡ chữ theo px, 2–3 archetype, must-have, lỗi cấm. Ví dụ:
+  - ad: đúng 1 CTA, safe zone story 14/35/6%;
+  - menu: giá căn cột tabular, không dấu chấm dẫn;
+  - logo: chạy được ở 32 px và một màu;
+  - slides: tiêu đề nêu ý chính, ≤ 40 chữ/slide.
+
+**Soát cuối (tự động trên catalog đã ký):**
+- 9/9 recipe có cờ `pipeline`, `effort: low`, `SPEC.md`; tên trang và kích thước khớp `recipe.json`; không sót hướng dẫn agent loop.
+- Prompt ghép 4–8.6k ký tự mỗi usecase.
+- Đọc toàn văn prompt flyer, sửa 5 chỗ: luật chữ mâu thuẫn, thiếu luật ngôn ngữ, logo brand kit, phạm vi luật `<img>`, bước ảnh treo.
+- Edit logo áp dụng lên SVG (có test).
+- Studio: thời gian ước tính theo pipeline ("Each design is ready in about 25–45 s…"); `typical_ms` của từng recipe cập nhật (poster, logo, slides theo số đo; các usecase khác ước tính, bridge tự hiệu chỉnh theo lịch sử).
+
+**Còn lại:**
+- Orchestrator (yêu cầu câu tự do) vẫn chạy agent loop, nhưng giao diện hiện không dùng đường này.
+- Chất lượng skill mới chưa được chấm A/B có số đo (dừng benchmark theo yêu cầu).
+
+227 test pass.

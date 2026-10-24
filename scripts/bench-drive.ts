@@ -40,6 +40,25 @@ const EDIT_VISUAL = {
   instruction: "Make the background picture a sunrise scene with golden morning light; keep all the text as it is.",
 };
 
+/** One realistic request per Studio usecase (`--task design:<recipe>`), decided before running. */
+const DESIGNS: Record<string, Record<string, unknown>> = {
+  flyer: { prompt: 'Flyer khai trương "Mây Bakery" — giảm 20% tuần đầu, từ 15/12/2026, tại 45 Hàng Bông, Hà Nội. Hotline 0901 234 567.' },
+  "ad-creative": { prompt: 'Banner quảng cáo khoá học tiếng Anh online "Speak Up" cho người đi làm, học 20 phút mỗi ngày.', cta: "Đăng ký ngay" },
+  "social-content": { prompt: 'Bài đăng Instagram ra mắt trà sữa khoai môn tại "Mây Tea", có mặt từ 01/12/2026.' },
+  "business-card": {
+    prompt: "Danh thiếp cho Nguyễn Lan Anh, Creative Director tại Mây Studio.",
+    contact_lines: ["0901 234 567", "lananh@maystudio.vn", "maystudio.vn", "12 Lý Thường Kiệt, Hà Nội"],
+  },
+  menu: {
+    prompt: 'Menu quán "Mây Coffee", phong cách ấm áp.',
+    items: ["Cà phê sữa — 35.000đ", "Bạc xỉu — 39.000đ", "Americano — 45.000đ", "Trà đào — 45.000đ", "Bánh croissant — 32.000đ"],
+  },
+  logo: { prompt: "Logo cho thương hiệu trà Mây Tea, thanh lịch, gần gũi thiên nhiên.", brand_name: "Mây Tea" },
+  "virtual-creative-usecase": {
+    prompt: 'Thiệp mời đám cưới "Minh Anh & Quang Huy", 18:00 Chủ nhật 20/12/2026, tại White Palace, 194 Hoàng Văn Thụ, TP.HCM.',
+  },
+};
+
 const catalog = JSON.parse(readFileSync(path.join(catalogDir, "catalog.json"), "utf8")) as {
   recipes: { id: string }[];
 };
@@ -63,7 +82,7 @@ const accept = (id: string) => {
   return { recipe_digest: accepted.digest, recipe_id: accepted.id, recipe_version: accepted.version };
 };
 const source = from ? app.manager.get(from) : undefined;
-if (task !== "poster" && task !== "slides" && !source) throw new Error(`--task ${task} needs --from <run id>`);
+if (task !== "poster" && task !== "slides" && !task.startsWith("design:") && !source) throw new Error(`--task ${task} needs --from <run id>`);
 
 let run: RunRow;
 switch (task) {
@@ -103,8 +122,26 @@ switch (task) {
     });
     break;
   }
-  default:
-    throw new Error(`unknown task ${task}`);
+  default: {
+    const id = task.startsWith("design:") ? task.slice("design:".length) : "";
+    const design = DESIGNS[id];
+    if (!design) throw new Error(`unknown task ${task}`);
+    const settings = JSON.parse((recipe(id) as unknown as { files: Record<string, string> }).files[`${id}/recipe.json`] ?? "{}");
+    const size = (settings.sizes ?? [])[0] as { id: string; width: number; height: number } | undefined;
+    run = app.manager.create({
+      skill: id,
+      title: `Bench ${id}`,
+      harness,
+      request: {
+        fields: {},
+        ...design,
+        ...(size ? { size: size.id, width: size.width, height: size.height } : {}),
+        variation: 1,
+        of: 1,
+        ...accept(id),
+      },
+    });
+  }
 }
 
 console.error(`${label} ${task}: ${run.id}`);
@@ -125,7 +162,7 @@ const measured = measure(app.config.home, row);
 let taskPassed = ["completed"].includes(done.localStatus);
 // A poster or a picture edit counts only with its picture: without it the run is faster but not
 // the same product (image quota out, docs/generation-perf-log.md p1).
-if (task === "poster" || task === "poster-edit-visual") {
+if (task === "poster" || task === "poster-edit-visual" || ["flyer", "ad-creative", "social-content"].includes(task.slice(7))) {
   const out = path.join(app.config.runsDir, run.id, "out");
   taskPassed &&= ["visual.jpg", "visual.png", "visual.svg"].some((name) => existsSync(path.join(out, name)));
 }
