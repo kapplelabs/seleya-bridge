@@ -207,3 +207,30 @@ Chi tiết lớp fallback:
 - Stop bridge giờ không còn để lại Chrome.
 - Test fallback: renderer luôn lỗi thì vẫn ra `poster.preview.html` có ảnh dạng data URL, check facts và trích dẫn pass, check rendering fail.
 - 222 test pass.
+
+### p6 — không có ảnh thì agent thiết kế vẽ SVG; dùng MCP tạo ảnh của người dùng (2026-10-24 19:4x)
+
+**Nguyên tắc:** agent chữ nào cũng viết được code; tạo ảnh thì tuỳ agent và quota. Thứ tự lấy ảnh:
+1. **Agent có năng lực tạo ảnh**, theo thứ tự:
+   - mặc định theo agent (Antigravity, Codex);
+   - `capabilities.json`;
+   - worker của Agent Fabric;
+   - **MCP tạo ảnh người dùng đã cài cho Claude Code**: tự nhận theo tên hoặc lệnh (image, imagen, dall-e, flux, fal, replicate, stability, ideogram, midjourney, recraft, nano-banana…), hoặc khai báo `{"mcp": {"<server>": ["image"]}}`.
+   Chỉ job ảnh mới được bật đúng các server đó (`--mcp-config` + `--strict-mcp-config`, cho phép `mcp__<server>` và `curl` để tải ảnh trả về dạng link). Mọi lần chạy khác của Claude Code vẫn cách ly.
+2. **Không agent nào làm được** (hết quota, không có agent ảnh, agent lỗi): chính agent đã thiết kế vẽ ảnh dạng **SVG**, tiếp tục cùng cuộc hội thoại nên biết bố cục và palette. SVG được làm sạch: chỉ giữ `<svg>`, bỏ `<script>`, `<foreignObject>`, `on*=`, link ra ngoài, giới hạn 400 KB. Các trang chuyển sang `url('visual.svg')`, rồi render và check lại. Kết quả có check "picture" (passed) ghi "Drawn as artwork: …".
+3. Vẽ cũng không được: kết quả báo "Completed with issues — No picture was made (…)".
+
+**Đo thật** (`aasr6b62`, poster Hạt Mộc, quota ảnh vẫn 429):
+
+| Mốc | Thời gian |
+|---|---|
+| Sẵn sàng (thiết kế trên nền màu) | **24 s** |
+| Agent ảnh thử rồi nhận 429 | 91 s |
+| Vẽ SVG (cùng hội thoại) | 29 s |
+| Bản cuối có hình, mọi check pass | 132 s |
+
+- **Chất lượng:** SVG 6.7 KB vẽ cửa sổ, tách cà phê bốc khói, lá cây, đúng palette nâu gỗ và xanh lá; chữ dễ đọc; facts, contrast và layout đều pass.
+- **Chưa đo được:** MCP tạo ảnh thật, vì máy chưa cài MCP nào như vậy (chỉ có codebase-memory, agent-room, murmur, agent-fabric-peer, stitch). Đã có test cho phần nhận diện và cho việc chỉ job ảnh mới được dùng server đó.
+- **Hướng tối ưu tiếp:** khi biết chắc không có agent ảnh nào (ví dụ không agent nào khai báo năng lực ảnh), vẽ SVG ngay thay vì chờ 91 s thử thất bại. Cần quyết định về độ tin của tín hiệu 429 (quota thường hồi trong vài giờ).
+
+225 test pass.

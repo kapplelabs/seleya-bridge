@@ -5,11 +5,13 @@ import path from "node:path";
 import { test } from "node:test";
 
 import { FakeClock } from "../../src/generation/clock.ts";
+import { claudeCode } from "../../src/generation/harness/builtins.ts";
 import { FabricHarness } from "../../src/generation/harness/fabric.ts";
 import { HarnessRegistry } from "../../src/generation/harness/registry.ts";
 import type { ScriptAction } from "../../src/generation/harness/scripted.ts";
 import type { Harness, HarnessStartInput, HarnessStatus } from "../../src/generation/harness/types.ts";
 import type { MediaResult } from "../../src/generation/media/broker.ts";
+import { mediaMcpServers } from "../../src/generation/media/mcp.ts";
 import { Store } from "../../src/generation/runs/store.ts";
 import { loadSkill, skillIndex, type SkillMeta } from "../../src/generation/skills.ts";
 import { advanceUntil, makeTestApp } from "./helpers.ts";
@@ -280,5 +282,39 @@ test("US1: a job no agent delivers fails the media check, the run still finishes
     assert.match(check?.findings[0] ?? "", /hero \(image\) was not made: lazy did not deliver it/);
   } finally {
     await t.cleanup();
+  }
+});
+
+test("an MCP server the person connected that makes images gives Claude Code images, for media jobs only", () => {
+  const servers = {
+    "fal-image": { command: "npx", args: ["-y", "fal-ai-mcp"] },
+    "my-gen": { type: "http", url: "https://gen.example/mcp" },
+    "codebase-memory-mcp": { command: "npx", args: ["-y", "codebase-memory-mcp"] },
+    stitch: { type: "http", url: "https://stitch.googleapis.com/mcp" },
+  };
+  assert.deepEqual(Object.keys(mediaMcpServers("image", servers)), ["fal-image"]);
+  // A server whose name says nothing is used once the person declares it.
+  assert.deepEqual(Object.keys(mediaMcpServers("image", servers, { "my-gen": ["image"] })), ["fal-image", "my-gen"]);
+  assert.deepEqual(Object.keys(mediaMcpServers("audio", servers)), []);
+
+  const home = mkdtempSync(path.join(tmpdir(), "mcp-home-"));
+  const saved = { HOME: process.env.HOME, SELEYA_BRIDGE_HOME: process.env.SELEYA_BRIDGE_HOME };
+  try {
+    writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: servers }));
+    process.env.HOME = home;
+    process.env.SELEYA_BRIDGE_HOME = home;
+    const base = { prompt: "Make it", folder: "/tmp/run", timeLimitS: 60 };
+    const media = claudeCode.definition.args({ ...base, needs: ["image"] });
+    const config = JSON.parse(media[media.indexOf("--mcp-config") + 1]!) as { mcpServers: Record<string, unknown> };
+    assert.deepEqual(Object.keys(config.mcpServers), ["fal-image"], "only the image server");
+    assert.ok(media.includes("mcp__fal-image") && media.includes("--strict-mcp-config"));
+    const plain = claudeCode.definition.args(base);
+    assert.equal(plain.includes("--mcp-config"), false, "every other run stays isolated");
+    assert.equal(plain.some((arg) => arg.startsWith("mcp__") || arg.startsWith("Bash(curl")), false);
+  } finally {
+    process.env.HOME = saved.HOME;
+    if (saved.SELEYA_BRIDGE_HOME === undefined) delete process.env.SELEYA_BRIDGE_HOME;
+    else process.env.SELEYA_BRIDGE_HOME = saved.SELEYA_BRIDGE_HOME;
+    rmSync(home, { recursive: true, force: true });
   }
 });

@@ -127,7 +127,7 @@ let taskPassed = ["completed"].includes(done.localStatus);
 // the same product (image quota out, docs/generation-perf-log.md p1).
 if (task === "poster" || task === "poster-edit-visual") {
   const out = path.join(app.config.runsDir, run.id, "out");
-  taskPassed &&= ["visual.jpg", "visual.png"].some((name) => existsSync(path.join(out, name)));
+  taskPassed &&= ["visual.jpg", "visual.png", "visual.svg"].some((name) => existsSync(path.join(out, name)));
 }
 if (task === "poster-edit-text") {
   const html = path.join(app.config.runsDir, run.id, "out", "poster.html");

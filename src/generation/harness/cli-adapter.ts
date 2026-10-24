@@ -38,6 +38,8 @@ export interface ArgsInput {
   prompt: string;
   folder: string;
   timeLimitS: number;
+  /** Media kinds this task makes (a media job); an agent may then use the person's MCP servers. */
+  needs?: string[];
   /** A conversation to continue; only passed to a definition that `canResume`. */
   resume?: string;
   effort?: "low" | "medium" | "high";
@@ -57,7 +59,7 @@ export interface CliDefinition {
   capabilities: string[];
   signInCommand?: string;
   /** Called only when the command is installed. */
-  probe: () => Promise<{ signedIn: boolean; version?: string; detail?: string }>;
+  probe: () => Promise<{ signedIn: boolean; version?: string; detail?: string; capabilities?: string[] }>;
 }
 
 /** "Antigravity was not allowed to read …/transcript.jsonl (outside this run's folder)." */
@@ -92,8 +94,16 @@ export class CliHarness implements Harness {
         signInCommand,
         detail: `\`${command}\` is not installed.`,
       };
-    const probe = await this.definition.probe();
-    return { installed: true, canGenerateImages, capabilities, signInCommand, ...probe };
+    // Kinds the agent gains from what the person connected to it (MCP servers), on top of its own.
+    const { capabilities: gained = [], ...probe } = await this.definition.probe();
+    const all = [...new Set([...capabilities, ...gained])];
+    return {
+      installed: true,
+      canGenerateImages: all.includes("image"),
+      capabilities: all,
+      signInCommand,
+      ...probe,
+    };
   }
 
   start(input: HarnessStartInput): HarnessHandle {
@@ -106,6 +116,7 @@ export class CliHarness implements Harness {
         folder: input.folder,
         timeLimitS: Math.ceil(input.skill.timeLimitMs / 1000),
         resume: definition.canResume ? input.resume : undefined,
+        needs: input.needs,
         effort: input.effort,
       }),
       cwd: input.folder,

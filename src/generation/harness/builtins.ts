@@ -2,7 +2,9 @@
  * The three CLI agents Seleya knows (research R1, R2). Every command keeps the agent's permission
  * checks on and points it at the run folder only.
  */
+import { generationHome } from "../config.ts";
 import { DECLARED } from "../media/declarations.ts";
+import { claudeMcpKinds, claudeMcpServers, declaredMcp, type McpServer, mediaMcpServers } from "../media/mcp.ts";
 import { CliHarness, run } from "./cli-adapter.ts";
 
 const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() || undefined;
@@ -69,24 +71,35 @@ export const claudeCode = new CliHarness({
   capabilities: DECLARED.claude ?? [],
   signInCommand: "claude /login",
   canResume: true,
-  args: ({ prompt, resume, effort }) => [
-    "-p",
-    prompt,
-    ...(resume ? ["--resume", resume] : []),
-    ...(effort ? ["--effort", effort] : []),
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--include-partial-messages",
-    "--permission-mode",
-    "acceptEdits",
-    "--allowedTools",
-    "Bash(printf:*)",
-    "Bash(mkdir:*)",
-    // No `cp`: it takes any source path, so it could copy files from outside the run folder in.
-    "Bash(sips:*)",
-    "--strict-mcp-config",
-  ],
+  args: ({ prompt, resume, effort, needs }) => {
+    // A media job may use the person's MCP servers that make that media, and only those.
+    const servers = Object.assign(
+      {},
+      ...(needs ?? []).map((kind) => mediaMcpServers(kind, claudeMcpServers(), declaredMcp(generationHome()))),
+    ) as Record<string, McpServer>;
+    const media = Object.keys(servers);
+    return [
+      "-p",
+      prompt,
+      ...(resume ? ["--resume", resume] : []),
+      ...(effort ? ["--effort", effort] : []),
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowedTools",
+      "Bash(printf:*)",
+      "Bash(mkdir:*)",
+      // No `cp`: it takes any source path, so it could copy files from outside the run folder in.
+      "Bash(sips:*)",
+      // A generator that answers with a link: its picture is fetched into the run folder.
+      ...(media.length ? ["Bash(curl:*)", ...media.map((name) => `mcp__${name}`)] : []),
+      ...(media.length ? ["--mcp-config", JSON.stringify({ mcpServers: servers })] : []),
+      "--strict-mcp-config",
+    ];
+  },
   probe: async () => {
     const [status, version] = await Promise.all([
       run("claude", ["auth", "status"]),
@@ -102,6 +115,7 @@ export const claudeCode = new CliHarness({
       signedIn,
       version: firstLine(version.stdout),
       detail: signedIn ? undefined : "Not signed in.",
+      capabilities: claudeMcpKinds(generationHome()),
     };
   },
 });

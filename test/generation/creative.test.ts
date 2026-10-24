@@ -490,3 +490,51 @@ test("pipeline: a picture that cannot be made is reported, not hidden", async ()
     await t.cleanup();
   }
 });
+
+test("pipeline: with no picture, the design's agent draws one as SVG, cleaned of anything active", async () => {
+  const quotaOut: Harness = {
+    id: "painter",
+    name: "Painter",
+    check: async () => ({ installed: true, signedIn: true, canGenerateImages: true, capabilities: ["image"] }),
+    start: (input) => {
+      writeFileSync(path.join(input.folder, "out", "media", "visual.error.txt"), "Image quota exhausted (429)");
+      return { onActivity: () => undefined, exited: Promise.resolve({ ok: true }), stop: async () => undefined };
+    },
+  };
+  const t = makeTestApp({ mediaAgents: async () => [quotaOut] });
+  try {
+    const { digest } = t.app.recipes.accept(
+      signedRecipe("poster", (recipe) => {
+        recipe.files["poster/SPEC.md"] = "# Poster\n\nFollow `skills/CREATIVE-SPEC.md`.";
+        recipe.files["CREATIVE-SPEC.md"] = "Answer with one JSON object.";
+        recipe.files["poster/recipe.json"] = JSON.stringify({ ...JSON.parse(recipe.files["poster/recipe.json"]!), pipeline: "spec" });
+      }),
+    );
+    const design = JSON.stringify({
+      image_prompt: "A black monolith with a violet light, no text",
+      brief: {},
+      concept: { palette: ["#000000", "#7c3aed"] },
+      pages: [{ name: "poster", html: "<body style=\"background:#111 url('visual.jpg') center/cover\"><h1>Seleya</h1></body>" }],
+    });
+    const drawing = JSON.stringify({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1500"><script>alert(1)</script><rect width="1000" height="1500" fill="#000" onload="steal()"/><image href="http://evil.example/x.png"/><rect x="480" width="40" height="1500" fill="#7c3aed"/></svg>',
+    });
+    const run = t.app.manager.create({
+      skill: "poster",
+      title: "Drawn",
+      request: { recipe_digest: digest, prompt: "Seleya", width: 1000, height: 1500, scripts: [[{ answer: design }], [{ answer: drawing }]] },
+    });
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus) && t.app.manager.get(run.id).phase === "completed");
+    const done = t.app.manager.get(run.id);
+    assert.equal(done.localStatus, "completed", JSON.stringify(done.checks));
+    const out = path.join(t.config.runsDir, run.id, "out");
+    const svg = readFileSync(path.join(out, "visual.svg"), "utf8");
+    assert.match(svg, /fill="#7c3aed"/);
+    assert.doesNotMatch(svg, /script|onload|evil\.example/);
+    assert.match(readFileSync(path.join(out, "poster.html"), "utf8"), /url\('visual\.svg'\)/);
+    assert.equal(JSON.parse(readFileSync(path.join(out, "result.json"), "utf8")).visual, "out/visual.svg");
+    assert.match(done.checks.find((check) => check.name === "picture")?.findings[0] ?? "", /Drawn as artwork/);
+  } finally {
+    await t.cleanup();
+  }
+});
