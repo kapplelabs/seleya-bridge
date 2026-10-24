@@ -44,6 +44,9 @@ import { HttpError, readJson, sendEmpty, sendError, sendJson } from "./http.ts";
 import { LINK_OWNER } from "./link/policy.ts";
 import type { LinkService } from "./link/service.ts";
 import type { Pairing, TokenStore } from "./pairing.ts";
+import { PROVIDERS_CATALOG, getProviderMeta } from "./providers/catalog.ts";
+import { runProviderStream } from "./providers/runner.ts";
+import { ProviderStore, sanitizeConnection, type StoredConnection } from "./providers/store.ts";
 import { RESULT_KEY_PATTERN, type ResultEntry, type ResultStore } from "./results.ts";
 import { RunRegistry, type Run } from "./runs.ts";
 import { startRun } from "./runs/start.ts";
@@ -64,6 +67,27 @@ const linkSchema = z.object({
   enrollment_token: z.string().min(1).max(200),
   server_path: z.string().max(101).default("/api"),
   device_name: z.string().trim().min(1).max(100).optional(),
+});
+
+const testKeySchema = z.object({
+  provider_id: z.string().min(1),
+  api_key: z.string().min(1),
+  custom_base_url: z.string().optional(),
+});
+
+const createConnectionSchema = z.object({
+  provider_id: z.string().min(1),
+  name: z.string().optional(),
+  api_key: z.string().min(1),
+  priority: z.number().int().optional(),
+  custom_base_url: z.string().optional(),
+});
+
+const updateConnectionSchema = z.object({
+  name: z.string().optional(),
+  priority: z.number().int().optional(),
+  is_active: z.boolean().optional(),
+  api_key: z.string().optional(),
 });
 
 /** How this bridge was installed, so Seleya can say how to update it: the macOS app, or the CLI. */
@@ -111,6 +135,7 @@ export function createBridgeServer(deps: BridgeDeps): {
   const linkService = () => deps.link;
   const runs = new RunRegistry(onBusyChange);
   const tickets = new TicketStore();
+  const providerStore = new ProviderStore();
   const publicOrigin = `http://127.0.0.1:${config.port}`;
 
   const streamFor = (run: Run) => {
@@ -218,9 +243,127 @@ export function createBridgeServer(deps: BridgeDeps): {
       });
     }
 
+    /* ---------- API Key Providers Catalog & Management ---------- */
+    if (method === "GET" && url.pathname === "/v1/providers") {
+      return sendJson(res, 200, {
+        providers: PROVIDERS_CATALOG,
+        connections: providerStore.getSanitizedConnections(),
+      });
+    }
+
+    if (method === "POST" && url.pathname === "/v1/providers/test") {
+      const body = await readJson(req, testKeySchema);
+      const result = await providerStore.testKey(body.provider_id, body.api_key, body.custom_base_url);
+      return sendJson(res, 200, result);
+    }
+
+    if (method === "POST" && url.pathname === "/v1/providers/connections") {
+      const body = await readJson(req, createConnectionSchema);
+      const connection = await providerStore.addConnection({
+        providerId: body.provider_id,
+        name: body.name,
+        apiKey: body.api_key,
+        priority: body.priority,
+        customBaseUrl: body.custom_base_url,
+      });
+      return sendJson(res, 201, { connection: sanitizeConnection(connection) });
+    }
+
+    if (parts[0] === "v1" && parts[1] === "providers" && parts[2] === "connections" && parts[3]) {
+      const connId = parts[3];
+      if (method === "PATCH") {
+        const body = await readJson(req, updateConnectionSchema);
+        const updated = providerStore.updateConnection(connId, {
+          name: body.name,
+          priority: body.priority,
+          isActive: body.is_active,
+          apiKey: body.api_key,
+        });
+        if (!updated) throw new HttpError(404, "not_found", "Connection not found");
+        return sendJson(res, 200, { connection: sanitizeConnection(updated) });
+      }
+      if (method === "DELETE") {
+        const ok = providerStore.deleteConnection(connId);
+        if (!ok) throw new HttpError(404, "not_found", "Connection not found");
+        return sendEmpty(res, 204);
+      }
+    }
+
+    if (method === "GET" && url.pathname === "/v1/models") {
+      const activeConns = providerStore.getConnections().filter((c) => c.isActive);
+      const modelsList: unknown[] = [];
+      for (const conn of activeConns) {
+        const meta = getProviderMeta(conn.providerId);
+        for (const mId of conn.modelIds) {
+          const catModel = meta?.models.find((m) => m.id === mId);
+          modelsList.push({
+            id: `${conn.providerId}/${mId}`,
+            modelId: mId,
+            name: catModel?.name || mId,
+            provider: conn.providerId,
+            connectionId: conn.id,
+            contextLength: catModel?.contextLength,
+            maxOutputTokens: catModel?.maxOutputTokens,
+          });
+        }
+      }
+      return sendJson(res, 200, { data: modelsList });
+    }
+
     if (method === "POST" && url.pathname === "/v1/runs") {
       const record = authorize(req, origin);
-      const body = await readJson(req, runRequestSchema);
+      const raw = await readJson(req, z.record(z.string(), z.unknown()));
+
+      // Check if this run is targeting an API Key provider connection
+      const requestedModel =
+        typeof raw.model_id === "string"
+          ? raw.model_id
+          : typeof raw.model === "string"
+            ? raw.model
+            : undefined;
+
+      let providerConn: StoredConnection | undefined;
+      let actualModelId = requestedModel;
+
+      if (requestedModel) {
+        const allActive = providerStore.getConnections().filter((c) => c.isActive);
+        for (const conn of allActive) {
+          if (requestedModel.startsWith(`${conn.providerId}/`)) {
+            providerConn = conn;
+            actualModelId = requestedModel.slice(conn.providerId.length + 1);
+            break;
+          }
+          if (conn.modelIds.includes(requestedModel)) {
+            providerConn = conn;
+            break;
+          }
+        }
+      }
+
+      if (providerConn && actualModelId && typeof raw.prompt === "string") {
+        if (runs.busy) throw new HttpError(409, "busy", "Another request is still running");
+        const sessionId = typeof raw.session_id === "string" ? raw.session_id : crypto.randomUUID();
+        const run = runs.create({
+          sessionId,
+          persisted: false,
+          ownerId: record.id,
+          origin: record.origin,
+          provider: "claude",
+        });
+        void runProviderStream(run, {
+          prompt: raw.prompt,
+          modelId: actualModelId,
+          connection: providerConn,
+        });
+        return sendJson(res, 201, {
+          runId: run.id,
+          sessionId: run.sessionId,
+          provider: providerConn.providerId,
+          stream: streamFor(run),
+        });
+      }
+
+      const body = runRequestSchema.parse(raw);
       const { run, persisted } = startRun(
         body,
         { ownerId: record.id, origin: record.origin },
