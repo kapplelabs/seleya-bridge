@@ -23,6 +23,8 @@ import { canReadCalendar, parseWeekStart, runCalendarWeek } from "./calendar.ts"
 import { runClaude } from "./claude.ts";
 import type { BridgeConfig } from "./config.ts";
 import type { ConnectorSet } from "./connectors.ts";
+import { type GenerationMount, GENERATION_PREFIX } from "./generation/mount.ts";
+import { ENGINE_VERSION } from "./generation/recipes.ts";
 import { HttpError, readJson, sendEmpty, sendError, sendJson } from "./http.ts";
 import { canReadMail, DEFAULT_DAYS, MAX_DAYS, MIN_DAYS, runMailTriage } from "./mail.ts";
 import type { Pairing, TokenStore } from "./pairing.ts";
@@ -59,6 +61,8 @@ export interface BridgeDeps {
   pairing: Pairing;
   /** The connectors runs may read from; empty until discovery finishes. */
   connectors: () => ConnectorSet;
+  /** Generation (spec 009), served under /v1/generation; absent while it starts or when off. */
+  generation?: () => GenerationMount | undefined;
 }
 
 const titleFrom = (prompt: string) => {
@@ -66,7 +70,14 @@ const titleFrom = (prompt: string) => {
   return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1)}…` : line || "New chat";
 };
 
-export function createBridgeServer({ config, version, tokens, pairing, connectors }: BridgeDeps): {
+export function createBridgeServer({
+  config,
+  version,
+  tokens,
+  pairing,
+  connectors,
+  generation,
+}: BridgeDeps): {
   server: Server;
   runs: RunRegistry;
 } {
@@ -115,6 +126,9 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
         version,
         paired: token !== undefined && tokens.find(token, origin) !== undefined,
         busy: runs.busy,
+        // Recipes name the engine they need (spec 009); the page compares before starting one.
+        engine: ENGINE_VERSION,
+        generation: generation?.() !== undefined,
         // Which connectors Claude can read from; tools and errors stay in the bridge's terminal.
         connectors: connectors().connectors.map(({ id, name, state }) => ({ id, name, state })),
       });
@@ -252,7 +266,18 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
     }
     if (req.method === "OPTIONS") return sendPreflight(req, res);
 
-    route(req, res, origin).catch((error: unknown) => {
+    // Generation has its own queue and routes (spec 009); chat's one-at-a-time rule doesn't apply.
+    const url = req.url ?? "/";
+    const generationMount = generation?.();
+    const handled =
+      url === GENERATION_PREFIX || url.startsWith(`${GENERATION_PREFIX}/`)
+        ? generationMount
+          ? generationMount.handle(req, res, origin)
+          : Promise.reject(
+              new HttpError(503, "generation_starting", "Generation is still starting, try again"),
+            )
+        : route(req, res, origin);
+    handled.catch((error: unknown) => {
       const httpError =
         error instanceof HttpError ? error : new HttpError(500, "internal_error", "Something went wrong in the bridge");
       if (!(error instanceof HttpError)) console.error(error);

@@ -1,0 +1,22 @@
+{
+  "result": "pages",
+  "format": "card",
+  "sizes": [
+    {
+      "id": "7:4",
+      "label": "Card 7:4",
+      "width": 1050,
+      "height": 600
+    }
+  ],
+  "pages": [
+    "front",
+    "back"
+  ],
+  "outputs": [
+    "png",
+    "pdf"
+  ],
+  "fixed_size": true,
+  "required_parts": []
+}
