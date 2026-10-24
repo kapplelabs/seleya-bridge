@@ -2,7 +2,16 @@ import type { SkillMeta } from "../skills.ts";
 
 /** Something the agent did or said, normalized across harnesses (spec 002 FR-005). */
 export type HarnessActivity =
-  | { kind: "tool"; tool: string; state: "started" | "finished"; durationMs?: number }
+  | {
+      kind: "tool";
+      tool: string;
+      state: "started" | "finished";
+      durationMs?: number;
+      /** Pairs a call's "started" with its "finished" when one tool runs many times. */
+      callId?: string;
+      /** The call's input (file, command, prompt…), turned into words by describe.ts. */
+      input?: Record<string, unknown>;
+    }
   | { kind: "text"; text: string };
 
 export interface HarnessExit {

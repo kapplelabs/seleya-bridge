@@ -11,7 +11,7 @@ import path from "node:path";
 
 import type { Clock, Timer } from "../clock.ts";
 import type { LocalConfig } from "../config.ts";
-import { toolLabel } from "../harness/labels.ts";
+import { type Described, describeTool } from "../harness/describe.ts";
 import type { Harness, HarnessActivity, HarnessExit, HarnessHandle } from "../harness/types.ts";
 import { makeMedia, readJobs } from "../media/broker.ts";
 import { containedPath } from "../paths.ts";
@@ -118,6 +118,19 @@ export function promptFor(skill: SkillMeta, request: Record<string, unknown>): s
   ].join("\n");
 }
 
+/** At most this many "carry on" turns when the agent stops before its result. */
+const MAX_CONTINUES = 1;
+
+/** The instruction for an agent that stopped early: same skill, same folder, from where it was. */
+export function continuePrompt(skill: SkillMeta, request: Record<string, unknown>): string {
+  return [
+    "You stopped before finishing. Carry on from where you left off: everything you already made is",
+    "in this folder, and progress.jsonl lists the steps you reported. Do not redo finished steps.",
+    "Do not read, list or search anything outside this folder. Finish with out/result.json.",
+    promptFor(skill, request),
+  ].join("\n");
+}
+
 /**
  * Runs one generation: prepares its folder, starts the harness, turns progress lines and harness
  * activity into events, finishes as soon as the result manifest is there, then post-processes.
@@ -138,6 +151,9 @@ export class RunRunner {
   private thought: { id: string; startedAt: number } | undefined;
   private thoughts = 0;
   private toolStarts = new Map<string, number>();
+  private continues = 0;
+  /** What each running call was described as, by call id (a "finished" may carry no input). */
+  private toolCalls = new Map<string, Described>();
   readonly folder: string;
 
   private deps: RunnerDeps;
@@ -220,15 +236,7 @@ export class RunRunner {
     this.tailer = new LineTailer(path.join(this.folder, "progress.jsonl"), (line) =>
       this.onProgress(line),
     );
-    this.handle = harness.start({
-      runId: this.run.id,
-      folder: this.folder,
-      prompt: promptFor(skill, this.run.request),
-      skill,
-      request: this.run.request,
-    });
-    this.handle.onActivity((activity) => this.onActivity(activity));
-    void this.handle.exited.then((exit) => this.onExit(exit));
+    this.startAgent(promptFor(skill, this.run.request));
     this.ticker = clock.setInterval(() => this.tick(), config.tailIntervalMs);
     this.deadline = clock.setTimeout(
       () =>
@@ -341,19 +349,33 @@ export class RunRunner {
       return;
     }
     this.closeThought();
-    const label = toolLabel(activity.tool);
+    // Spec 003 FR-006a: the call in the run's own words, with its file, command or prompt.
+    const key = activity.callId ?? activity.tool;
+    const described =
+      (activity.input ? describeTool(activity.tool, activity.input, this.folder) : undefined) ??
+      this.toolCalls.get(key) ??
+      describeTool(activity.tool, undefined, this.folder);
     let durationMs = activity.durationMs;
-    if (activity.state === "started") this.toolStarts.set(activity.tool, now);
-    else if (durationMs === undefined && this.toolStarts.has(activity.tool))
-      durationMs = now - (this.toolStarts.get(activity.tool) ?? now);
+    if (activity.state === "started") {
+      this.toolStarts.set(key, now);
+      this.toolCalls.set(key, described);
+    } else {
+      if (durationMs === undefined && this.toolStarts.has(key))
+        durationMs = now - (this.toolStarts.get(key) ?? now);
+      this.toolStarts.delete(key);
+      this.toolCalls.delete(key);
+    }
     this.emit("seleya.activity", {
       kind: "tool",
       tool: activity.tool,
-      label,
+      label: described.label,
+      detail: described.detail,
+      call_id: activity.callId,
       state: activity.state,
       duration_ms: durationMs,
     });
-    if (activity.state === "started") this.emit("seleya.run.phase", { phase: "tool", label });
+    if (activity.state === "started")
+      this.emit("seleya.run.phase", { phase: "tool", label: described.label });
   }
 
   private manifest(): Record<string, unknown> | undefined {
@@ -534,10 +556,37 @@ export class RunRunner {
     return check;
   }
 
+  /** Starts (or restarts, to carry on) the run's own agent in its folder. */
+  private startAgent(prompt: string) {
+    const handle = this.deps.harness.start({
+      runId: this.run.id,
+      folder: this.folder,
+      prompt,
+      skill: this.deps.skill,
+      request: this.run.request,
+    });
+    this.handle = handle;
+    handle.onActivity((activity) => this.onActivity(activity));
+    void handle.exited.then((exit) => {
+      if (this.handle === handle) this.onExit(exit);
+    });
+  }
+
   private onExit(exit: HarnessExit) {
     if (this.agentDone || this.ended) return;
     this.tailer?.poll();
     if (this.manifest()) return void this.finishAgent();
+    // The agent ended its turn before the result (often right after a refused action): ask it once
+    // to carry on from what it already made in this folder.
+    if (exit.ok && this.continues < MAX_CONTINUES) {
+      this.continues += 1;
+      this.emit("seleya.run.notice", {
+        message: exit.message
+          ? `${exit.message} Asking it to carry on.`
+          : "The agent stopped before finishing. Asking it to carry on.",
+      });
+      return this.startAgent(continuePrompt(this.deps.skill, this.run.request));
+    }
     this.agentDone = true;
     this.stopTimers();
     this.fail(
@@ -545,7 +594,7 @@ export class RunRunner {
       exit.ok
         ? {
             code: "no_result",
-            message: "The agent finished without producing a result.",
+            message: exit.message ?? "The agent finished without producing a result.",
             retryable: true,
           }
         : {

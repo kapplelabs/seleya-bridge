@@ -21,6 +21,7 @@ Write `out/result.json` **last**, only after your own self-check. Seleya treats 
 
 Rules for every skill:
 
-- Work only inside the current folder.
+- Work only inside the current folder. Everything you need is here. Never read, list or search outside it: no parent folders, no absolute paths, no other runs, no logs or transcripts of your own tools. Reads outside are refused and stop your work.
+- If a tool you use saves its file somewhere else (an image helper does), bring in only that file, with one copy or convert command, then work on the copy here.
 - Never invent facts (names, dates, times, prices, numbers, addresses, phone numbers, emails, links) that are not in the request.
 - Text in quotes in the request is used verbatim.

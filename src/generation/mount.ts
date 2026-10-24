@@ -15,7 +15,7 @@ import { TicketStore } from "../tickets.ts";
 import type { LocalApp } from "./app.ts";
 import { setFileUrlBuilder } from "./runs/events.ts";
 import { answerError } from "./server/http.ts";
-import { useGatewayEnvelope } from "./server/sse.ts";
+import { setFrameTransform, useGatewayEnvelope } from "./server/sse.ts";
 
 export const GENERATION_PREFIX = "/v1/generation";
 /** Files: 10 min, reused while more than 5 min remain so image URLs stay stable (D8). */
@@ -68,6 +68,14 @@ export function mountGeneration(options: {
       `${publicOrigin}${GENERATION_PREFIX}/runs/${encodeURIComponent(runId)}/files/${encodedPath}?ticket=${fileTicket(runId)}&v=${versionOf(runId, encodedPath)}`,
   );
   useGatewayEnvelope(true);
+  // Events are stored with the file URLs of their time; a replay (a reload, 10 min later, after a
+  // bridge restart) gets a fresh ticket for each, so drafts never show as broken images.
+  setFrameTransform((text) =>
+    text.replace(
+      /(\/v1\/generation\/runs\/([A-Za-z0-9_-]+)\/files\/[^"?]*\?ticket=)[A-Za-z0-9_-]+/g,
+      (_, prefix: string, runId: string) => `${prefix}${fileTicket(runId)}`,
+    ),
+  );
 
   const paired = (req: IncomingMessage, origin: string | undefined) => {
     const token = bearerToken(req);

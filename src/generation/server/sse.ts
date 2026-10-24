@@ -15,11 +15,17 @@ export function useGatewayEnvelope(on: boolean): void {
   gatewayEnvelope = on;
 }
 
+/** Rewrites a frame's text before it is sent (seleya-bridge: fresh file tickets on replay). */
+let frameTransform = (text: string) => text;
+export function setFrameTransform(transform: (text: string) => string): void {
+  frameTransform = transform;
+}
+
 function frame(event: StoredEvent): string {
   const data = gatewayEnvelope
     ? { event_type: event.type, session_id: event.runId, data: event.data }
     : event.data;
-  return `id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(data)}\n\n`;
+  return `id: ${event.seq}\nevent: ${event.type}\ndata: ${frameTransform(JSON.stringify(data))}\n\n`;
 }
 
 /**
