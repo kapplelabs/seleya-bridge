@@ -215,6 +215,9 @@ export function createBridgeServer({
         status: run.status,
         output: verbatim(run.output ?? null),
         text: run.text ?? null,
+        sources: run.summary?.sources ?? null,
+        connectorErrors: run.summary?.connectorErrors ?? null,
+        redactions: run.summary?.redactions ?? null,
         error: run.error ?? null,
       });
     }

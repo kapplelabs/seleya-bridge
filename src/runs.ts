@@ -27,6 +27,15 @@ export interface RunError {
   retryable: boolean;
 }
 
+/** What a completed run read, for GET /v1/runs/:id as for run.completed. */
+export interface RunSummary {
+  /** Connectors that answered without an error. */
+  sources: { id: string; name: string }[];
+  /** The first error of each connector that failed, redacted and classified. */
+  connectorErrors: { connector: string; kind: string; message: string }[];
+  redactions: number;
+}
+
 export interface RunInit {
   /** The provider session (Claude Code session id), always the bridge's own. */
   sessionId: string;
@@ -52,6 +61,8 @@ export class Run {
   text: string | undefined;
   /** The structured output, redacted; set when a run with an output schema completes. */
   output: object | undefined;
+  /** Set when the run completes. */
+  summary: RunSummary | undefined;
   /** Why the run failed or was cancelled. */
   error: RunError | undefined;
   private readonly listeners = new Set<Listener>();

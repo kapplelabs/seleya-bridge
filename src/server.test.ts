@@ -193,6 +193,9 @@ describe("server", () => {
     assert.equal(body.session_id, null);
     assert.equal(body.text, "Done.\n");
     assert.deepEqual(body.output, { dueDate: "2026-10-24", openItems: 2 });
+    assert.deepEqual(body.sources, []);
+    assert.deepEqual(body.connector_errors, []);
+    assert.equal(body.redactions, 0);
     assert.equal(body.error, null);
   });
 

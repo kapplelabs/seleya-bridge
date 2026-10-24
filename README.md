@@ -195,7 +195,7 @@ for debugging, Seleya shows its own words for each `code`.
 | `DELETE /v1/pair` | Bearer | | `204`, revokes the caller's token |
 | `GET /v1/capabilities` | Bearer | | `{ bridge_version, time_zone, default_provider, providers: [{ id, state, models, features, connectors_state, connectors }], limits }` |
 | `POST /v1/runs` | Bearer | see below | `201 { run_id, session_id, provider, stream }` |
-| `GET /v1/runs/:id` | Bearer | | `{ run_id, session_id, provider, status, output, text, error }` |
+| `GET /v1/runs/:id` | Bearer | | `{ run_id, session_id, provider, status, output, text, sources, connector_errors, redactions, error }` |
 | `POST /v1/runs/:id/tickets` | Bearer | | `stream` with a fresh ticket |
 | `POST /v1/runs/:id/cancel` | Bearer | | `202` |
 | `GET /v1/runs/:id/stream?ticket=` | ticket | | `text/event-stream` |

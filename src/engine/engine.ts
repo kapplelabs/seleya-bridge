@@ -262,12 +262,15 @@ class EventMapper {
     const names = new Map(this.adapter.status().connectors.map(({ id, name }) => [id, name]));
     this.run.text = text;
     this.run.output = output;
-    this.run.emit("run.completed", {
-      text,
-      ...(output === undefined ? {} : { output }),
+    this.run.summary = {
       sources: [...this.sources].map((id) => ({ id, name: names.get(id) ?? id })),
       connectorErrors: [...this.connectorErrors.values()],
       redactions: this.run.redactor.total,
+    };
+    this.run.emit("run.completed", {
+      text,
+      ...(output === undefined ? {} : { output }),
+      ...this.run.summary,
       ...(event.usage === undefined ? {} : { usage: event.usage }),
       durationMs: Date.now() - this.startedAt,
     });

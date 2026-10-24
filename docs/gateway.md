@@ -281,6 +281,9 @@ trước khi dựa vào một field mới, và kiểm tra giá trị thật mà 
   "status": "running",       // "running" | "completed" | "failed" | "cancelled"
   "output": null,            // structured output đã redact, khi completed và có output_schema
   "text": null,              // câu trả lời cuối, đã redact, khi completed
+  "sources": null,           // như run.completed, khi completed
+  "connector_errors": null,  // như run.completed, khi completed
+  "redactions": null,        // như run.completed, khi completed
   "error": null              // {code, message, retryable} khi failed
 }
 ```
