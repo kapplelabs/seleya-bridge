@@ -39,6 +39,7 @@ const controller = new BridgeController({
   version: __BRIDGE_VERSION__,
   claudeExecutable: bundledClaude(),
   onPairingCode: announceCode,
+  onScheduledRun: announceScheduledRun,
 });
 
 function ensurePanel(): BrowserWindow {
@@ -70,6 +71,16 @@ function announceCode({ code, origin }: PairingCode): void {
     body: `${new URL(origin).host} wants to connect. Enter this code in Seleya; it expires in 2 minutes.`,
   });
   notification.on("click", showPanel);
+  notification.show();
+}
+
+/** A scheduled run ended: says so, never what it read; a click opens Seleya, where the result is. */
+function announceScheduledRun(name: string, status: "completed" | "failed"): void {
+  const notification = new Notification({
+    title: status === "completed" ? `${name} is ready` : `${name} couldn't run`,
+    body: status === "completed" ? "Open Seleya to see it." : "Open Seleya to see why and run it again.",
+  });
+  notification.on("click", openSeleya);
   notification.show();
 }
 
@@ -147,6 +158,8 @@ function registerIpc(): void {
   });
   handle(CHANNELS.getLog, () => logLines());
   handle(CHANNELS.copyCode, copyCode);
+  handle(CHANNELS.unlink, () => controller.unlink());
+  handle(CHANNELS.setSchedulesPaused, (_event, paused: boolean) => controller.setSchedulesPaused(paused === true));
 }
 
 function main(): void {

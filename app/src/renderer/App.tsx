@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { ConnectorsCard } from "./components/ConnectorsCard.tsx";
+import { LinkCard } from "./components/LinkCard.tsx";
 import { LogPanel } from "./components/LogPanel.tsx";
 import { PairedBrowsers } from "./components/PairedBrowsers.tsx";
 import { PairingCard } from "./components/PairingCard.tsx";
@@ -70,6 +71,7 @@ export function App() {
             <StatusHero state={state} />
             {state.pairing && <PairingCard pairing={state.pairing} />}
             <PairedBrowsers paired={state.paired} />
+            <LinkCard link={state.link} />
             <ConnectorsCard
               connectors={state.connectors}
               running={state.status === "running"}

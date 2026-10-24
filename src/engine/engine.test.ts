@@ -36,7 +36,10 @@ function fakeAdapter(script: (run: Run) => AsyncIterable<AgentEvent> | Iterable<
 }
 
 function newRun(persisted = false): Run {
-  return new Run({ sessionId: "session-1", persisted, ownerId: "owner", provider: "claude" }, () => {});
+  return new Run(
+    { sessionId: "session-1", persisted, origin: "https://seleya.example.com", ownerId: "owner", provider: "claude" },
+    () => {},
+  );
 }
 
 function newSpec(extra: Partial<RunSpec> = {}): RunSpec {

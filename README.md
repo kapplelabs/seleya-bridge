@@ -7,7 +7,8 @@ and streams provider-neutral SSE events back.
 
 The bridge holds no product logic: prompts, output schemas and what Seleya does with the result live in
 Seleya. The bridge keeps what must be enforced on this machine: pairing, isolation, read-only connectors,
-redaction, limits and one run at a time. The design is in [docs/gateway.md](docs/gateway.md).
+redaction, limits and one run at a time. The design is in [docs/gateway.md](docs/gateway.md); schedules
+set in Seleya and run here are in [docs/server-link.md](docs/server-link.md).
 
 ```
 Seleya (browser) ──HTTPS page, fetch/EventSource──▶ seleya-bridge (127.0.0.1:47821) ──▶ Claude Code
@@ -33,6 +34,8 @@ Commands:
 seleya-bridge [start] [--port <n>] [--allow-origin <origin>]...
 seleya-bridge revoke     # forget every paired browser
 seleya-bridge config     # print the config file path
+seleya-bridge link       # show the link to a Seleya account and its schedules
+seleya-bridge unlink     # unlink from the Seleya account (with the bridge stopped)
 ```
 
 ## Seleya Bridge app (macOS)
@@ -54,6 +57,11 @@ For people who don't use a terminal, `app/` is a menu-bar app that runs the same
   bridge). Any website can open such a link, so it never changes settings, pairs a browser or starts a
   bridge you stopped. Set `BRIDGE_DOWNLOAD_URL` in Seleya's `.env` to show a
   download link too.
+- **Updates**: health reports `version` and `distribution` (`app` or `cli`). Seleya compares the version with
+  `BRIDGE_LATEST_VERSION` (an older bridge gets a banner suggesting the update) and `BRIDGE_MIN_VERSION` (an
+  older bridge gets a banner saying it must be updated) from its `.env`, and shows the app's download link or
+  the CLI's update command. After a release, raise `BRIDGE_LATEST_VERSION`; raise `BRIDGE_MIN_VERSION` too
+  when Seleya relies on something an older bridge doesn't do.
 
 The app and the CLI share `config.json`, `tokens.json` and the port, so run one at a time: the app says so
 when the port is taken.
@@ -87,6 +95,8 @@ first run:
 | `limits` | `{ "maxTurns": 60, "maxToolOutputTokens": 100000 }` | Ceilings on what one run may ask for |
 | `claudeExecutable` | bundled with the SDK | Path to a `claude` binary, e.g. `~/.local/bin/claude` |
 | `connectors` | `{}` | claude.ai connectors Claude may read from: `"auto"` or a map by Seleya connector id (see below) |
+| `results` | `{ "retentionDays": 14, "maxKeys": 200 }` | Kept run results (see *Results*) |
+| `link` | `{ "enabled": true, "connectors": "all", "maxRunsPerDay": 24, "minIntervalMinutes": 30 }` | The Seleya account link: `enabled: false` stops polling and scheduled runs; ceilings for scheduled runs (see *Schedules*) |
 
 `SELEYA_BRIDGE_PORT` / `--port` and `SELEYA_BRIDGE_ALLOWED_ORIGINS` (comma-separated) / `--allow-origin`
 override the file for one process.
@@ -133,6 +143,43 @@ bridge.
 
 A run keeps no transcript unless `session.persist` is set. A persisted conversation gets a session id
 from the bridge, which only the browser that started it can continue (`session.resume_id`).
+
+### Templates
+
+A request with `template` (`{ "week_offset"?: -4…8 }`) gets these variables filled in, in `prompt` and
+`system_prompt`, on this machine's clock and time zone: `{{now}}` (`2026-10-24T08:00:00+07:00`),
+`{{now_text}}` (`Saturday, October 24, 2026 at 8:00 AM`), `{{today}}`, `{{time_zone}}`, `{{week_start}}`
+(this week's Monday plus `week_offset` weeks) and `{{connectors}}` (the names of the connectors the run got).
+Dates take a day offset: `{{week_start:+4}}` is Friday. Anything else between `{{ }}` is
+`400 invalid_template`. The values come back in `run.started.template_vars`. Keep `{{now}}` out of
+`system_prompt`: a value that changes every minute stops the provider from caching the prompt.
+
+## Results
+
+A request with `store: { key, meta? }` keeps its outcome on this machine, in `results/` next to
+`config.json` (one file per key, mode 600): the latest completed run (output, text, sources, connector
+errors, the template's values) and, when newer, the last failure. `meta` (at most 8 KB) is Seleya's own note
+and comes back as it was sent. Every paired browser of the same origin can read them, so a result is still
+there after a reload, in another browser, or when the run was a scheduled one. Results older than
+`results.retentionDays` are deleted. `run.completed` / `run.failed` say `store: { key, ok }`.
+
+## Schedules (Seleya account link)
+
+Seleya can link the bridge to the signed-in Seleya account (`POST /v1/link` with a code Seleya got from its
+server; the server is always the linking page's origin plus `/api`). The bridge then keeps one long-poll open
+to the server, which sends the schedules set in Seleya and commands such as *run now*:
+
+- **The bridge keeps the clock.** Schedules run here at their time, in their time zone. A machine that slept
+  through one runs it when it wakes, within the schedule's catch-up window. Schedules keep running from the
+  last copy (`link-config.json`) while the server can't be reached. A run waits while someone is using
+  Seleya: a browser's request always goes first.
+- **Results stay here** (see *Results*). The server only learns whether each run worked: status, error code,
+  duration, which connectors were read and how many values were redacted. Never output, text or tool input.
+- **Narrower than a browser.** A scheduled run never gets workspace tools or a persisted session, reads only
+  connectors within `link.connectors`, and at most `link.maxRunsPerDay` run per day.
+- Browsers of the linked origin can watch and stop a scheduled run (`GET /v1/link` → `active_run`).
+- `seleya-bridge unlink`, the app's *Unlink*, or unlinking the machine in Seleya ends the link; kept results
+  stay.
 
 ## Personal and secret data
 
@@ -189,16 +236,22 @@ for debugging, Seleya shows its own words for each `code`.
 
 | Method & path | Auth | Body | Response |
 |---|---|---|---|
-| `GET /v1/health` | optional | | `{ name, version, paired, busy }` (`paired` is whether the sent token is valid for the sending origin) |
+| `GET /v1/health` | optional | | `{ name, version, distribution, paired, busy }` (`distribution`: `app` or `cli`, how it was installed, so Seleya can say how to update it; `paired` is whether the sent token is valid for the sending origin) |
 | `POST /v1/pair/start` | Origin | | `{ expires_at }`; `429 too_many_requests` within 3 s of the last code, `429 pairing_locked` after too many wrong codes |
 | `POST /v1/pair/confirm` | Origin | `{ code }` | `{ token }`; `401 invalid_code` |
 | `DELETE /v1/pair` | Bearer | | `204`, revokes the caller's token |
-| `GET /v1/capabilities` | Bearer | | `{ bridge_version, time_zone, default_provider, providers: [{ id, state, models, features, connectors_state, connectors }], limits }` |
+| `GET /v1/capabilities` | Bearer | | `{ bridge_version, distribution, time_zone, default_provider, providers: [{ id, state, models, features, connectors_state, connectors }], limits }` |
 | `POST /v1/runs` | Bearer | see below | `201 { run_id, session_id, provider, stream }` |
 | `GET /v1/runs/:id` | Bearer | | `{ run_id, session_id, provider, status, output, text, sources, connector_errors, redactions, error }` |
 | `POST /v1/runs/:id/tickets` | Bearer | | `stream` with a fresh ticket |
 | `POST /v1/runs/:id/cancel` | Bearer | | `202` |
 | `GET /v1/runs/:id/stream?ticket=` | ticket | | `text/event-stream` |
+| `GET /v1/results` | Bearer | | `{ results: [{ key, status, finished_at, trigger, schedule_id, meta, has_failure }] }` of the caller's origin |
+| `GET /v1/results/:key` | Bearer | | `{ key, latest, last_failure }`; `404 result_not_found`, `400 invalid_key` |
+| `DELETE /v1/results/:key` | Bearer | | `204` |
+| `GET /v1/link` | Bearer | | `{ linked, server, origin, user_id, device_id, device_name, state, last_sync_at, config_revision, paused, schedules, queue, active_run }` |
+| `POST /v1/link` | Bearer | `{ enrollment_token, server_path?, device_name? }` | Same as `GET`; `401 enrollment_invalid`, `409 already_linked`, `502 server_unreachable` |
+| `DELETE /v1/link` | Bearer | | `204` |
 
 `POST /v1/runs` body:
 
@@ -212,13 +265,15 @@ for debugging, Seleya shows its own words for each `code`.
   "connectors": ["calendar"],           // or "all"; default none
   "workspace_tools": ["read_file"],     // or "all"; default none
   "output_schema": { "type": "object" },// optional JSON Schema (draft-7): the answer comes back as `output`
-  "limits": { "max_turns": 40, "max_tool_output_tokens": 60000 }
+  "limits": { "max_turns": 40, "max_tool_output_tokens": 60000 },
+  "template": { "week_offset": 0 },     // optional: fill {{now}}, {{today}}… (see Templates)
+  "store": { "key": "u_1:briefing", "meta": {} }   // optional: keep the outcome (see Results)
 }
 ```
 
 It answers `400 invalid_request` / `invalid_output_schema`, `404 session_not_found`,
 `409 provider_unavailable` / `connectors_discovering` / `busy`, `422 model_not_allowed` /
-`connector_unavailable` / `tool_not_allowed`. `stream` is Seleya's `ChatStream`:
+`connector_unavailable` / `tool_not_allowed`, `400 invalid_template`. `stream` is Seleya's `ChatStream`:
 `{ stream_id, ticket, expires_at, url }`. `session_id` is `null` for a run that isn't persisted.
 
 ### Stream events
@@ -229,11 +284,11 @@ resumes after that event; a new ticket replays the run from the start. Finished 
 
 | Event | When |
 |---|---|
-| `run.started` | First, with the values the run really got (provider, connectors, workspace tools, limits…) |
+| `run.started` | First, with the values the run really got (provider, connectors, workspace tools, limits…, `template_vars`) |
 | `text.started` / `text.delta` / `text.completed` | Each text block, streamed a line at a time, redacted |
 | `thinking.started` / `thinking.delta` / `thinking.completed` | Each thinking block, sent whole once it ends, redacted |
 | `tool.started` / `tool.completed` | Tool calls: `kind` (`connector`, `workspace`, `other`), `connector`, `name`, redacted `input`; then `ok` and `error` |
 | `output.started` | The model started writing the structured answer |
-| `run.completed` | `{ text, output?, sources, connector_errors, redactions, usage?, duration_ms }` |
+| `run.completed` | `{ text, output?, sources, connector_errors, redactions, usage?, duration_ms, store? }` |
 | `run.failed` | `{ code, message, retryable, details? }`: `provider_auth_required`, `provider_usage_limit`, `provider_api_error`, `context_limit`, `max_turns`, `invalid_output`, `no_result`, `cancelled`, `provider_error` |
 | `stream.done` | Always last |

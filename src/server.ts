@@ -1,39 +1,50 @@
 /**
  * HTTP API (docs/gateway.md §5; all JSON is snake_case on the wire):
- *   GET    /v1/health                    → { name, version, paired, busy }
+ *   GET    /v1/health                    → { name, version, distribution, paired, busy }
  *   POST   /v1/pair/start                → { expires_at }       shows a code in the terminal or app
  *   POST   /v1/pair/confirm  { code }    → { token }
  *   DELETE /v1/pair                      → 204                  revokes the caller's token
- *   GET    /v1/capabilities              → { bridge_version, time_zone, default_provider, providers, limits }
+ *   GET    /v1/capabilities              → { bridge_version, distribution, time_zone, default_provider, providers,
+ *                                           limits }
  *   POST   /v1/runs  { prompt, provider?, model?, system_prompt?, session?, connectors?, workspace_tools?,
  *                      output_schema?, limits? }  → { run_id, session_id, provider, stream }
+ *                      template?, store? }  (docs/server-link.md §5)
  *   GET    /v1/runs/:id                  → { run_id, session_id, provider, status, output, text, error }
  *   POST   /v1/runs/:id/tickets          → stream               a fresh ticket for the same run
  *   POST   /v1/runs/:id/cancel           → 202
  *   GET    /v1/runs/:id/stream?ticket=   → text/event-stream    the run's events (§6)
+ *   GET    /v1/results                   → { results }          kept results of this origin (server-link.md §6.2)
+ *   GET    /v1/results/:key              → { key, latest, last_failure }
+ *   DELETE /v1/results/:key              → 204
+ *   GET    /v1/link                      → the server link, its schedules and active run (server-link.md §6.1)
+ *   POST   /v1/link  { enrollment_token, server_path?, device_name? }  → same as GET
+ *   DELETE /v1/link                      → 204
  * `stream` is Seleya's ChatStream: { stream_id, ticket, expires_at, url }. Every endpoint but health, pairing
  * and stream needs `Authorization: Bearer <token>`; a run or session of another paired browser looks like it
- * doesn't exist.
+ * doesn't exist, except the server link's runs, which browsers of the link's origin may watch and stop.
  */
-import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { z } from "zod";
 
 import { verbatim } from "./case.ts";
 import type { BridgeConfig } from "./config.ts";
-import { runOnce } from "./engine/engine.ts";
 import {
-  buildRunSpec,
   MAX_OUTPUT_SCHEMA_BYTES,
   MAX_PROMPT_CHARS,
+  MAX_STORE_META_BYTES,
   MAX_SYSTEM_PROMPT_CHARS,
   runRequestSchema,
 } from "./engine/policy.ts";
+import { TEMPLATE_VARS } from "./engine/template.ts";
 import type { ProviderAdapter, ProviderId } from "./engine/types.ts";
 import { HttpError, readJson, sendEmpty, sendError, sendJson } from "./http.ts";
+import { LINK_OWNER } from "./link/policy.ts";
+import type { LinkService } from "./link/service.ts";
 import type { Pairing, TokenStore } from "./pairing.ts";
+import { RESULT_KEY_PATTERN, type ResultEntry, type ResultStore } from "./results.ts";
 import { RunRegistry, type Run } from "./runs.ts";
+import { startRun } from "./runs/start.ts";
 import type { SessionStore } from "./sessions.ts";
 import {
   bearerToken,
@@ -47,44 +58,52 @@ import { streamRun } from "./sse.ts";
 import { TicketStore } from "./tickets.ts";
 
 const confirmSchema = z.object({ code: z.string().regex(/^\d{6}$/, "must be 6 digits") });
+const linkSchema = z.object({
+  enrollment_token: z.string().min(1).max(200),
+  server_path: z.string().max(101).default("/api"),
+  device_name: z.string().trim().min(1).max(100).optional(),
+});
+
+/** How this bridge was installed, so Seleya can say how to update it: the macOS app, or the CLI. */
+export type BridgeDistribution = "app" | "cli";
 
 export interface BridgeDeps {
   config: BridgeConfig;
   version: string;
+  distribution: BridgeDistribution;
   tokens: TokenStore;
   pairing: Pairing;
   /** Which paired browser started each persisted conversation, with which provider. */
   sessions: SessionStore;
   /** The providers runs may use, by id; their status() is what /v1/capabilities shows. */
   providers: Map<ProviderId, ProviderAdapter>;
+  /** Kept outcomes of runs that asked for `store`. */
+  results: ResultStore;
+  /** The link to a Seleya account; absent, /v1/link answers 404. */
+  link?: LinkService;
   /** A provider started or finished answering a request. */
   onBusyChange?: (busy: boolean) => void;
 }
 
-/**
- * The engine finishes every run itself; this only catches a bug in it, so a run that threw still ends
- * and the bridge doesn't stay busy forever.
- */
-function finishCrashed(run: Run, error: unknown): void {
-  console.error(error);
-  if (run.finished) return;
-  run.error = { code: "provider_error", message: "The bridge failed while running this request", retryable: true };
-  run.emit("run.failed", run.error);
-  run.emit("stream.done", {});
+/** A kept result as the wire shows it: the output and meta keep the keys Seleya wrote. */
+function resultBody(entry: ResultEntry) {
+  const attempt = <T extends { meta: Record<string, unknown> }>(value: T | null) =>
+    value && { ...value, meta: verbatim(value.meta) };
+  const latest = attempt(entry.latest);
+  return {
+    key: entry.key,
+    latest: latest && { ...latest, output: verbatim(latest.output) },
+    lastFailure: attempt(entry.lastFailure),
+  };
 }
 
-export function createBridgeServer({
-  config,
-  version,
-  tokens,
-  pairing,
-  sessions,
-  providers,
-  onBusyChange,
-}: BridgeDeps): {
+export function createBridgeServer(deps: BridgeDeps): {
   server: Server;
   runs: RunRegistry;
 } {
+  const { config, version, distribution, tokens, pairing, sessions, providers, results, onBusyChange } = deps;
+  // Read on each request: the bridge creates the link after the server (it needs the run registry).
+  const linkService = () => deps.link;
   const runs = new RunRegistry(onBusyChange);
   const tickets = new TicketStore();
   const publicOrigin = `http://127.0.0.1:${config.port}`;
@@ -107,11 +126,16 @@ export function createBridgeServer({
     return record;
   };
 
-  /** The run, if the caller started it: another paired browser's runs look like they don't exist. */
-  const runOr404 = (id: string, ownerId: string) => {
+  /**
+   * The run, if the caller started it, or if it is the server link's and the caller is a browser of the
+   * link's origin (server-link.md §6.5): another paired browser's runs look like they don't exist.
+   */
+  const runOr404 = (id: string, caller: { id: string; origin: string }) => {
     const run = runs.get(id);
-    if (!run || run.ownerId !== ownerId)
-      throw new HttpError(404, "run_not_found", "No such run (finished runs are kept 10 minutes)");
+    const visible =
+      run !== undefined &&
+      (run.ownerId === caller.id || (run.ownerId === LINK_OWNER && linkService()?.origin() === caller.origin));
+    if (!visible) throw new HttpError(404, "run_not_found", "No such run (finished runs are kept 10 minutes)");
     return run;
   };
 
@@ -130,6 +154,7 @@ export function createBridgeServer({
       return sendJson(res, 200, {
         name: "seleya-bridge",
         version,
+        distribution,
         paired: token !== undefined && tokens.find(token, origin) !== undefined,
         busy: runs.busy,
       });
@@ -166,6 +191,7 @@ export function createBridgeServer({
       authorize(req, origin);
       return sendJson(res, 200, {
         bridgeVersion: version,
+        distribution,
         timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         defaultProvider: config.defaultProvider,
         providers: [...providers.values()].map((adapter) => {
@@ -178,36 +204,73 @@ export function createBridgeServer({
           maxPromptChars: MAX_PROMPT_CHARS,
           maxSystemPromptChars: MAX_SYSTEM_PROMPT_CHARS,
           maxOutputSchemaBytes: MAX_OUTPUT_SCHEMA_BYTES,
+          maxStoreMetaBytes: MAX_STORE_META_BYTES,
         },
+        features: { templateVars: TEMPLATE_VARS, results: true, link: linkService() !== undefined },
       });
     }
 
     if (method === "POST" && url.pathname === "/v1/runs") {
-      const owner = authorize(req, origin).id;
+      const record = authorize(req, origin);
       const body = await readJson(req, runRequestSchema);
-      // From here to runs.create nothing is awaited, so two requests can't both pass the busy check (§8.4).
-      const { spec, provider, adapter, persisted } = buildRunSpec(body, {
-        config,
-        providers,
-        sessions,
-        ownerId: owner,
-        newId: randomUUID,
-      });
-      if (runs.busy) throw new HttpError(409, "busy", "Another request is still running");
-      // Recorded before the run exists: if writing sessions.json throws, no run is left holding `busy`.
-      if (persisted && !spec.session.resume) sessions.add(spec.session.id, owner, provider);
-      const run = runs.create({ sessionId: spec.session.id, persisted, ownerId: owner, provider });
-      runOnce(adapter, run, spec).catch((error: unknown) => finishCrashed(run, error));
+      const { run, persisted } = startRun(
+        body,
+        { ownerId: record.id, origin: record.origin },
+        { config, providers, sessions, runs, results },
+      );
       return sendJson(res, 201, {
         runId: run.id,
         sessionId: persisted ? run.sessionId : null,
-        provider,
+        provider: run.provider,
         stream: streamFor(run),
       });
     }
 
+    if (url.pathname === "/v1/link") {
+      const record = authorize(req, origin);
+      const link = linkService();
+      if (!link) throw new HttpError(404, "not_found", "Not found");
+      if (method === "GET") return sendJson(res, 200, link.view());
+      if (method === "POST") {
+        const body = await readJson(req, linkSchema);
+        return sendJson(
+          res,
+          200,
+          await link.link(record.origin, body.server_path, body.enrollment_token, body.device_name),
+        );
+      }
+      if (method === "DELETE") {
+        await link.unlink();
+        return sendEmpty(res, 204);
+      }
+    }
+
+    if (method === "GET" && url.pathname === "/v1/results") {
+      return sendJson(res, 200, {
+        results: results
+          .list(authorize(req, origin).origin)
+          .map((summary) => ({ ...summary, meta: verbatim(summary.meta) })),
+      });
+    }
+
+    if (parts[0] === "v1" && parts[1] === "results" && parts[2] && parts.length === 3) {
+      const record = authorize(req, origin);
+      const key = decodeURIComponent(parts[2]);
+      if (!RESULT_KEY_PATTERN.test(key)) throw new HttpError(400, "invalid_key", "Not a result key");
+      if (method === "GET") {
+        const entry = results.get(record.origin, key);
+        if (!entry) throw new HttpError(404, "result_not_found", "No result is kept under this key");
+        return sendJson(res, 200, resultBody(entry));
+      }
+      if (method === "DELETE") {
+        if (!results.delete(record.origin, key))
+          throw new HttpError(404, "result_not_found", "No result is kept under this key");
+        return sendEmpty(res, 204);
+      }
+    }
+
     if (method === "GET" && parts[0] === "v1" && parts[1] === "runs" && parts[2] && parts.length === 3) {
-      const run = runOr404(parts[2], authorize(req, origin).id);
+      const run = runOr404(parts[2], authorize(req, origin));
       return sendJson(res, 200, {
         runId: run.id,
         sessionId: run.persisted ? run.sessionId : null,
@@ -236,10 +299,10 @@ export function createBridgeServer({
         return streamRun(req, res, run);
       }
       if (method === "POST" && action === "tickets") {
-        return sendJson(res, 200, streamFor(runOr404(runId, authorize(req, origin).id)));
+        return sendJson(res, 200, streamFor(runOr404(runId, authorize(req, origin))));
       }
       if (method === "POST" && action === "cancel") {
-        runOr404(runId, authorize(req, origin).id).abort.abort();
+        runOr404(runId, authorize(req, origin)).abort.abort();
         return sendEmpty(res, 202);
       }
     }

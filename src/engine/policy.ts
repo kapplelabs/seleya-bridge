@@ -10,8 +10,10 @@ import { z } from "zod";
 
 import type { BridgeConfig } from "../config.ts";
 import { HttpError } from "../http.ts";
+import { RESULT_KEY_PATTERN } from "../results.ts";
 import type { SessionStore } from "../sessions.ts";
 import { preamble } from "./preamble.ts";
+import { fillTemplate, MAX_WEEK_OFFSET, MIN_WEEK_OFFSET, templateValues } from "./template.ts";
 import type { ProviderAdapter, ProviderConnector, ProviderId, RunSpec, WorkspaceTool } from "./types.ts";
 
 export const MAX_PROMPT_CHARS = 100_000;
@@ -19,6 +21,8 @@ export const MAX_SYSTEM_PROMPT_CHARS = 20_000;
 export const MAX_OUTPUT_SCHEMA_BYTES = 65_536;
 /** Nesting of objects and arrays, the root counting as 1. Deeper than any real schema needs. */
 export const MAX_OUTPUT_SCHEMA_DEPTH = 32;
+/** `store.meta` is Seleya's own note about the result (task, version, input), not a place for data. */
+export const MAX_STORE_META_BYTES = 8192;
 
 /** Connector ids and tool names: short identifiers, never free text. */
 const nameSchema = z.string().min(1).max(64);
@@ -47,6 +51,17 @@ export const runRequestSchema = z.object({
   output_schema: z.unknown().optional(),
   /** Any number: out of range is clamped, not refused. */
   limits: z.object({ max_turns: z.number().nullish(), max_tool_output_tokens: z.number().nullish() }).nullish(),
+  /** Present: `{{now}}`, `{{today}}`… in prompt and system_prompt are filled in (docs/server-link.md §5). */
+  template: z
+    .object({ week_offset: z.number().int().min(MIN_WEEK_OFFSET).max(MAX_WEEK_OFFSET).optional() })
+    .nullish(),
+  /** Present: the run's outcome is kept in the ResultStore under `key` (docs/server-link.md §6.2). */
+  store: z
+    .object({
+      key: z.string().regex(RESULT_KEY_PATTERN, "must be letters, digits and : . _ - (at most 120)"),
+      meta: z.record(z.string(), z.unknown()).optional(),
+    })
+    .nullish(),
 });
 
 export type RunRequest = z.infer<typeof runRequestSchema>;
@@ -59,6 +74,8 @@ export interface PolicyContext {
   ownerId: string;
   /** Session ids are always the bridge's: a client never picks the id of a new session. */
   newId: () => string;
+  /** The clock template variables read; tests set it. */
+  now?: () => Date;
 }
 
 export interface PolicyResult {
@@ -67,6 +84,8 @@ export interface PolicyResult {
   adapter: ProviderAdapter;
   /** True for a new or resumed conversation that is kept; the server records new ones in sessions.json. */
   persisted: boolean;
+  /** Where the run's outcome is kept, when the request asked. */
+  store?: { key: string; meta: Record<string, unknown> };
 }
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
@@ -113,7 +132,7 @@ function findAdapter(providers: ReadonlyMap<ProviderId, ProviderAdapter>, id: st
 
 /**
  * Checks a parsed request in the order of §5.2's table (rows 2–9; row 1 is the schema, row 10 `busy` is
- * the server's) and builds the run's spec. Throws HttpError with the table's code. Changes nothing: the
+ * the server's), fills its template and checks its store (docs/server-link.md §5) and builds the run's spec. Throws HttpError with the table's code. Changes nothing: the
  * server records a new persisted session once the run is created.
  */
 export function buildRunSpec(body: RunRequest, ctx: PolicyContext): PolicyResult {
@@ -180,11 +199,37 @@ export function buildRunSpec(body: RunRequest, ctx: PolicyContext): PolicyResult
   const title = !resume && persist ? body.session?.title : undefined;
   const session = { id: resumeId ?? ctx.newId(), resume, persist, ...(title !== undefined && { title }) };
 
+  let prompt = body.prompt;
+  let requestSystemPrompt = body.system_prompt ?? undefined;
+  let templateVars: RunSpec["templateVars"];
+  if (body.template != null) {
+    const values = templateValues({
+      now: ctx.now?.() ?? new Date(),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      weekOffset: body.template.week_offset ?? 0,
+      connectorNames: connectors.map((item) => item.name),
+    });
+    prompt = fillTemplate(prompt, values);
+    if (requestSystemPrompt !== undefined) requestSystemPrompt = fillTemplate(requestSystemPrompt, values);
+    // The values are short, but a prompt at the limit could still grow past it.
+    if (prompt.length > MAX_PROMPT_CHARS || (requestSystemPrompt?.length ?? 0) > MAX_SYSTEM_PROMPT_CHARS)
+      throw new HttpError(400, "invalid_request", "The prompt is too long once its template is filled in");
+    templateVars = values.vars;
+  }
+
+  let store: PolicyResult["store"];
+  if (body.store != null) {
+    const meta = body.store.meta ?? {};
+    if (Buffer.byteLength(JSON.stringify(meta)) > MAX_STORE_META_BYTES)
+      throw new HttpError(400, "invalid_request", `store.meta is larger than ${MAX_STORE_META_BYTES} bytes`);
+    store = { key: body.store.key, meta };
+  }
+
   const head = preamble(connectors.map((item) => item.name));
-  const systemPrompt = body.system_prompt?.trim() ? `${head}\n\n${body.system_prompt}` : head;
+  const systemPrompt = requestSystemPrompt?.trim() ? `${head}\n\n${requestSystemPrompt}` : head;
 
   const spec: RunSpec = {
-    prompt: body.prompt,
+    prompt,
     systemPrompt,
     session,
     ...(model !== undefined && { model }),
@@ -193,6 +238,7 @@ export function buildRunSpec(body: RunRequest, ctx: PolicyContext): PolicyResult
     ...(outputSchema !== undefined && { outputSchema }),
     maxTurns,
     ...(maxToolOutputTokens !== undefined && { maxToolOutputTokens }),
+    ...(templateVars !== undefined && { templateVars }),
   };
-  return { spec, provider: adapter.id, adapter, persisted: persist };
+  return { spec, provider: adapter.id, adapter, persisted: persist, ...(store !== undefined && { store }) };
 }

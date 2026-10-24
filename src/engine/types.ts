@@ -28,6 +28,8 @@ export interface RunSpec {
   maxTurns?: number;
   /** Unset: the provider's own limit. */
   maxToolOutputTokens?: number;
+  /** What a request's template was filled with (docs/server-link.md §5.2); providers don't read it. */
+  templateVars?: Record<string, string>;
 }
 
 export interface Usage {

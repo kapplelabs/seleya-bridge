@@ -54,6 +54,27 @@ const configSchema = z.object({
       maxToolOutputTokens: z.number().int().min(1000).max(500_000).default(100_000),
     })
     .default({ maxTurns: 60, maxToolOutputTokens: 100_000 }),
+  /** Kept results of runs that asked for `store` (docs/server-link.md §6.2). */
+  results: z
+    .object({
+      retentionDays: z.number().int().min(1).max(365).default(14),
+      maxKeys: z.number().int().min(1).max(10_000).default(200),
+    })
+    .default({ retentionDays: 14, maxKeys: 200 }),
+  /**
+   * The link to a Seleya account (docs/server-link.md §6.5): whether this bridge polls the server and runs
+   * its schedules, and the ceilings on what a scheduled run may do, below `connectors` and `limits`.
+   */
+  link: z
+    .object({
+      enabled: z.boolean().default(true),
+      connectors: z
+        .union([z.literal("all"), z.array(z.string().regex(/^[a-z][a-z0-9_-]*$/))])
+        .default("all"),
+      maxRunsPerDay: z.number().int().min(1).max(500).default(24),
+      minIntervalMinutes: z.number().int().min(5).max(1440).default(30),
+    })
+    .default({ enabled: true, connectors: "all", maxRunsPerDay: 24, minIntervalMinutes: 30 }),
   /** Path to a `claude` executable; omit to use the one bundled with the Agent SDK. */
   claudeExecutable: z.string().optional(),
   /**

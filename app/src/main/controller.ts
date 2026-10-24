@@ -6,9 +6,19 @@ import { app } from "electron";
 
 import { PortInUseError, startBridge, type Bridge } from "../../../src/bridge.ts";
 import { bridgeHome, DEFAULT_PORT, readConfigFile, updateConfigFile, type ConfigFile } from "../../../src/config.ts";
+import { unlinkStored } from "../../../src/link/client.ts";
+import type { LinkView } from "../../../src/link/service.ts";
+import { LinkStore } from "../../../src/link/store.ts";
 import type { ConnectorSet } from "../../../src/providers/claude/connectors.ts";
 import { TokenStore, type PairingCode } from "../../../src/pairing.ts";
-import type { BridgeError, BridgeSettings, BridgeState, BridgeStatus, SaveResult } from "../shared/ipc.ts";
+import type {
+  BridgeError,
+  BridgeSettings,
+  BridgeState,
+  BridgeStatus,
+  LinkPanelState,
+  SaveResult,
+} from "../shared/ipc.ts";
 
 const isLocal = (origin: string) => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin);
 
@@ -28,6 +38,50 @@ export interface ControllerOptions {
   claudeExecutable: string | undefined;
   /** A new pairing code to bring to the user's attention. */
   onPairingCode: (code: PairingCode) => void;
+  /** A scheduled run ended; the app may tell the user (never with what it read). */
+  onScheduledRun?: (name: string, status: "completed" | "failed") => void;
+}
+
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+/** What the panel shows of the link; with the bridge stopped, what link.json says. */
+function linkPanel(view: LinkView | undefined, config: ConfigFile | undefined): LinkPanelState {
+  const paused = config?.link.enabled === false;
+  if (!view) {
+    let stored;
+    try {
+      stored = new LinkStore(bridgeHome()).link();
+    } catch {
+      stored = undefined;
+    }
+    return stored
+      ? { linked: true, state: "offline", deviceName: stored.deviceName, server: hostOf(stored.server), paused, schedules: [] }
+      : { linked: false, state: "unlinked", paused, schedules: [] };
+  }
+  return {
+    linked: view.linked,
+    state: view.state,
+    deviceName: view.deviceName ?? undefined,
+    server: view.server ? hostOf(view.server) : undefined,
+    lastSyncAt: view.lastSyncAt ?? undefined,
+    paused,
+    schedules: view.schedules.map((schedule) => ({
+      id: schedule.id,
+      name: schedule.name,
+      enabled: schedule.enabled,
+      nextRunAt: schedule.nextRunAt ?? undefined,
+      lastRun: schedule.lastRun
+        ? { status: schedule.lastRun.status, code: schedule.lastRun.code ?? undefined, at: schedule.lastRun.at }
+        : undefined,
+    })),
+    activeScheduleId: view.activeRun?.scheduleId,
+  };
 }
 
 export class BridgeController {
@@ -36,6 +90,7 @@ export class BridgeController {
   private error: BridgeError | undefined;
   private busy = false;
   private connectors: ConnectorSet | undefined;
+  private link: LinkView | undefined;
   private pairing: PairingCode | undefined;
   private pairingTimer: NodeJS.Timeout | undefined;
   private readonly listeners = new Set<(state: BridgeState) => void>();
@@ -79,6 +134,7 @@ export class BridgeController {
         skipped: this.connectors?.skipped ?? [],
       },
       openAtLogin: app.getLoginItemSettings().openAtLogin,
+      link: linkPanel(this.link, config),
     };
   }
 
@@ -96,6 +152,7 @@ export class BridgeController {
     try {
       this.bridge = await startBridge({
         version: this.options.version,
+        distribution: "app",
         claudeExecutable: this.options.claudeExecutable,
         listener: {
           code: (code) => this.showCode(code),
@@ -114,8 +171,10 @@ export class BridgeController {
             this.busy = busy;
             this.changed();
           },
+          link: (view) => this.linkChanged(view),
         },
       });
+      this.link = this.bridge.link();
       this.status = "running";
       console.log(`Listening on http://127.0.0.1:${this.bridge.config.port}`);
     } catch (error) {
@@ -135,6 +194,7 @@ export class BridgeController {
     this.bridge = undefined;
     this.busy = false;
     this.connectors = undefined;
+    this.link = undefined;
     this.clearCode();
     this.status = "stopped";
     console.log("Stopped");
@@ -149,6 +209,40 @@ export class BridgeController {
   revokeAll(): void {
     const count = (this.bridge?.tokens ?? this.storedTokens())?.revokeAll() ?? 0;
     console.log(`Forgot ${count} paired ${count === 1 ? "browser" : "browsers"}`);
+    this.changed();
+  }
+
+  async unlink(): Promise<void> {
+    if (this.bridge) await this.bridge.unlink();
+    else await unlinkStored(new LinkStore(bridgeHome()));
+    this.link = this.bridge?.link();
+    console.log("Unlinked from Seleya");
+    this.changed();
+  }
+
+  async setSchedulesPaused(paused: boolean): Promise<SaveResult> {
+    try {
+      updateConfigFile({ link: { ...readConfigFile().link, enabled: !paused } });
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+    console.log(paused ? "Scheduled runs paused, restarting" : "Scheduled runs resumed, restarting");
+    if (this.bridge) await this.restart();
+    else this.changed();
+    return { ok: true };
+  }
+
+  /** Logs each scheduled run that ended and tells the app, then shows the new state. */
+  private linkChanged(view: LinkView): void {
+    const before = new Map(this.link?.schedules.map((schedule) => [schedule.id, schedule.lastRun?.at]));
+    this.link = view;
+    for (const schedule of view.schedules) {
+      const last = schedule.lastRun;
+      if (!last || before.get(schedule.id) === last.at) continue;
+      console.log(`Scheduled run "${schedule.name}": ${last.status}${last.code ? ` (${last.code})` : ""}`);
+      if (last.status === "completed" || last.status === "failed")
+        this.options.onScheduledRun?.(schedule.name, last.status);
+    }
     this.changed();
   }
 

@@ -6,9 +6,11 @@
 import { loadConfig, type BridgeConfig, type ConfigOverrides } from "./config.ts";
 import type { ProviderAdapter, ProviderId } from "./engine/types.ts";
 import { Pairing, TokenStore, type PairingListener } from "./pairing.ts";
+import { ResultStore } from "./results.ts";
+import { LinkService, type LinkView } from "./link/service.ts";
 import { ClaudeAdapter } from "./providers/claude/adapter.ts";
 import type { ConnectorSet } from "./providers/claude/connectors.ts";
-import { createBridgeServer } from "./server.ts";
+import { type BridgeDistribution, createBridgeServer } from "./server.ts";
 import { SessionStore } from "./sessions.ts";
 
 export interface BridgeListener extends PairingListener {
@@ -16,10 +18,13 @@ export interface BridgeListener extends PairingListener {
   connectors?: (set: ConnectorSet) => void;
   /** A provider started or finished answering a request. */
   busy?: (busy: boolean) => void;
+  /** The server link's state, schedules or last runs changed. */
+  link?: (view: LinkView) => void;
 }
 
 export interface BridgeOptions {
   version: string;
+  distribution: BridgeDistribution;
   overrides?: ConfigOverrides;
   /** The `claude` binary to use when config.json names none (the app ships its own). */
   claudeExecutable?: string;
@@ -35,6 +40,9 @@ export interface Bridge {
   /** Claude's connector discovery is still running. */
   discovering: () => boolean;
   busy: () => boolean;
+  /** The server link (docs/server-link.md): its view, and unlinking from the app. */
+  link: () => LinkView;
+  unlink: () => Promise<void>;
   /** Cancels every run and stops listening. */
   stop: () => Promise<void>;
 }
@@ -49,7 +57,13 @@ export class PortInUseError extends Error {
 }
 
 /** Resolves once the bridge listens; rejects when the config is invalid or the port is taken. */
-export async function startBridge({ version, overrides, claudeExecutable, listener }: BridgeOptions): Promise<Bridge> {
+export async function startBridge({
+  version,
+  distribution,
+  overrides,
+  claudeExecutable,
+  listener,
+}: BridgeOptions): Promise<Bridge> {
   const loaded = loadConfig(overrides);
   const config: BridgeConfig = { ...loaded, claudeExecutable: loaded.claudeExecutable ?? claudeExecutable };
   const tokens = new TokenStore(config.home);
@@ -57,6 +71,7 @@ export async function startBridge({ version, overrides, claudeExecutable, listen
   // Conversations of browsers revoked while the bridge was stopped (seleya-bridge revoke, the app).
   sessions.keepOwners(tokens.list().map((record) => record.id));
   const pairing = new Pairing(tokens, listener);
+  const results = new ResultStore(config.home, config.results);
   let stopped = false;
   const claude = new ClaudeAdapter(config, version, {
     onConnectors: (set) => {
@@ -64,15 +79,37 @@ export async function startBridge({ version, overrides, claudeExecutable, listen
     },
   });
   const providers = new Map<ProviderId, ProviderAdapter>([[claude.id, claude]]);
+  // The server's run registry exists only once the server does; the link reaches it through this.
+  let link: LinkService | undefined;
   const { server, runs } = createBridgeServer({
     config,
     version,
+    distribution,
     tokens,
     pairing,
     sessions,
     providers,
-    onBusyChange: listener.busy,
+    results,
+    get link() {
+      return link;
+    },
+    onBusyChange: (busy) => {
+      listener.busy?.(busy);
+      if (!busy) link?.idle();
+    },
   });
+  const linkService = new LinkService({
+    config,
+    version,
+    runs,
+    providers,
+    sessions,
+    results,
+    onChange: () => {
+      if (!stopped) listener.link?.(linkService.view());
+    },
+  });
+  link = linkService;
 
   await new Promise<void>((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) =>
@@ -86,6 +123,7 @@ export async function startBridge({ version, overrides, claudeExecutable, listen
   });
 
   for (const provider of providers.values()) await provider.start();
+  linkService.start();
 
   return {
     config,
@@ -94,9 +132,12 @@ export async function startBridge({ version, overrides, claudeExecutable, listen
     connectors: () => claude.connectors(),
     discovering: () => claude.discovering(),
     busy: () => runs.busy,
+    link: () => linkService.view(),
+    unlink: () => linkService.unlink(),
     stop: () =>
       new Promise<void>((resolve) => {
         stopped = true;
+        linkService.stop();
         runs.abortAll();
         void Promise.all([...providers.values()].map((provider) => provider.stop()));
         server.close(() => resolve());

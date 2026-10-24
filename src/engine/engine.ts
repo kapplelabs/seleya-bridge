@@ -97,6 +97,12 @@ interface Tool {
   open: boolean;
 }
 
+/**
+ * Called once as a run ends, before its run.completed / run.failed event; what it returns is added to that
+ * event. The server keeps stored results with it (results.ts).
+ */
+export type Settle = (run: Run, status: "completed" | "failed" | "cancelled") => object | undefined;
+
 /** Folds one run's AgentEvents into wire events; each method is a no-op once the run is finished. */
 class EventMapper {
   private readonly startedAt = Date.now();
@@ -114,11 +120,23 @@ class EventMapper {
   /** The first error each connector returned. */
   private readonly connectorErrors = new Map<string, ConnectorError>();
   private outputStarted = false;
+  private readonly settle: Settle | undefined;
 
-  constructor(adapter: ProviderAdapter, run: Run, spec: RunSpec) {
+  constructor(adapter: ProviderAdapter, run: Run, spec: RunSpec, settle: Settle | undefined) {
     this.adapter = adapter;
     this.run = run;
     this.spec = spec;
+    this.settle = settle;
+  }
+
+  /** The settle hook's additions; a hook that throws doesn't keep the run from ending. */
+  private settled(status: "completed" | "failed" | "cancelled"): object {
+    try {
+      return this.settle?.(this.run, status) ?? {};
+    } catch (error) {
+      console.error(error);
+      return {};
+    }
   }
 
   start(): void {
@@ -134,6 +152,8 @@ class EventMapper {
       workspaceTools: spec.workspaceTools,
       // null: the provider's own limit.
       limits: { maxTurns: spec.maxTurns ?? null, maxToolOutputTokens: spec.maxToolOutputTokens ?? null },
+      // The variable names are snake_case already, so the wire keeps them as they are.
+      ...(spec.templateVars === undefined ? {} : { templateVars: spec.templateVars }),
     });
   }
 
@@ -273,6 +293,7 @@ class EventMapper {
       ...this.run.summary,
       ...(event.usage === undefined ? {} : { usage: event.usage }),
       durationMs: Date.now() - this.startedAt,
+      ...this.settled("completed"),
     });
     this.run.emit("stream.done", {});
   }
@@ -289,6 +310,7 @@ class EventMapper {
       message: safeMessage,
       retryable,
       ...(details === undefined ? {} : { details: scratch.value(details) }),
+      ...this.settled(code === "cancelled" ? "cancelled" : "failed"),
     });
     this.run.emit("stream.done", {});
   }
@@ -302,9 +324,9 @@ class EventMapper {
  * Runs `spec` with `adapter`, writing every wire event to `run`. Never throws: a provider that throws
  * becomes provider_error, one that ends without a result no_result, and an aborted run cancelled.
  */
-export async function runOnce(adapter: ProviderAdapter, run: Run, spec: RunSpec): Promise<void> {
+export async function runOnce(adapter: ProviderAdapter, run: Run, spec: RunSpec, settle?: Settle): Promise<void> {
   if (run.finished) return;
-  const mapper = new EventMapper(adapter, run, spec);
+  const mapper = new EventMapper(adapter, run, spec, settle);
   mapper.start();
   if (run.abort.signal.aborted) return mapper.cancel();
   try {

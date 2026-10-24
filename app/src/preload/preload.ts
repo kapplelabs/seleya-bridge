@@ -21,6 +21,8 @@ const api: BridgeApi = {
   openConfigFile: () => ipcRenderer.invoke(CHANNELS.openConfigFile),
   getLog: () => ipcRenderer.invoke(CHANNELS.getLog),
   copyCode: () => ipcRenderer.invoke(CHANNELS.copyCode),
+  unlink: () => ipcRenderer.invoke(CHANNELS.unlink),
+  setSchedulesPaused: (paused) => ipcRenderer.invoke(CHANNELS.setSchedulesPaused, paused),
 };
 
 contextBridge.exposeInMainWorld("bridge", api);

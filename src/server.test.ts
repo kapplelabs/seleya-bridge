@@ -9,6 +9,8 @@ import { after, before, describe, test } from "node:test";
 import type { BridgeConfig } from "./config.ts";
 import type { AgentEvent, ProviderAdapter, ProviderId, ProviderStatus, RunSpec } from "./engine/types.ts";
 import { Pairing, TokenStore } from "./pairing.ts";
+import type { LinkService } from "./link/service.ts";
+import { ResultStore } from "./results.ts";
 import type { Run, RunRegistry } from "./runs.ts";
 import { createBridgeServer } from "./server.ts";
 import { SessionStore } from "./sessions.ts";
@@ -45,6 +47,10 @@ class FakeAdapter implements ProviderAdapter {
     yield { type: "text.start", key: "t0" };
     yield { type: "text.delta", key: "t0", text: "Done.\n" };
     yield { type: "text.end", key: "t0" };
+    if (spec.prompt.includes("[fail]")) {
+      yield { type: "failed", code: "provider_api_error", message: "Overloaded", retryable: true };
+      return;
+    }
     yield {
       type: "done",
       text: "Done.\n",
@@ -72,6 +78,20 @@ let server: Server;
 let runs: RunRegistry;
 let sessions: SessionStore;
 let tokens: TokenStore;
+let results: ResultStore;
+const linkCalls: unknown[][] = [];
+/** The parts of LinkService the server uses. */
+const linkStub = {
+  origin: () => ORIGIN,
+  view: () => ({ linked: true, origin: ORIGIN, state: "online", schedules: [], activeRun: null }),
+  link: async (...args: unknown[]) => {
+    linkCalls.push(args);
+    return { linked: true };
+  },
+  unlink: async () => {
+    linkCalls.push(["unlink"]);
+  },
+} as unknown as LinkService;
 let home: string;
 const adapter = new FakeAdapter();
 let token: string;
@@ -130,13 +150,17 @@ before(async () => {
   token = tokens.issue(ORIGIN);
   otherToken = tokens.issue(OTHER_ORIGIN);
   const pairing = new Pairing(tokens, { code: () => {} });
+  results = new ResultStore(home, { retentionDays: 14, maxKeys: 200 });
   ({ server, runs } = createBridgeServer({
     config,
     version: "9.9.9",
+    distribution: "cli",
     tokens,
     pairing,
     sessions,
     providers: new Map<ProviderId, ProviderAdapter>([["claude", adapter]]),
+    results,
+    link: linkStub,
   }));
   await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
 });
@@ -151,7 +175,7 @@ describe("server", () => {
   test("health has no connectors", async () => {
     const { status, body } = await call("GET", "/v1/health");
     assert.equal(status, 200);
-    assert.deepEqual(body, { name: "seleya-bridge", version: "9.9.9", paired: true, busy: false });
+    assert.deepEqual(body, { name: "seleya-bridge", version: "9.9.9", distribution: "cli", paired: true, busy: false });
   });
 
   test("capabilities need a token", async () => {
@@ -159,6 +183,7 @@ describe("server", () => {
     const { status, body } = await call("GET", "/v1/capabilities");
     assert.equal(status, 200);
     assert.equal(body.bridge_version, "9.9.9");
+    assert.equal(body.distribution, "cli");
     assert.equal(body.default_provider, "claude");
     assert.equal(body.time_zone, Intl.DateTimeFormat().resolvedOptions().timeZone);
     assert.deepEqual(body.limits, {
@@ -167,7 +192,10 @@ describe("server", () => {
       max_prompt_chars: 100_000,
       max_system_prompt_chars: 20_000,
       max_output_schema_bytes: 65_536,
+      max_store_meta_bytes: 8192,
     });
+    assert.equal(body.features.results, true);
+    assert.ok(body.features.template_vars.includes("week_start"));
     const [claude] = body.providers;
     assert.equal(claude.id, "claude");
     assert.equal(claude.detail, null);
@@ -274,5 +302,112 @@ describe("server", () => {
     const created = await call("POST", "/v1/runs", { body: { prompt: "Hi" } });
     await finished(created.body.run_id);
     assert.equal((await call("GET", `/v1/runs/${created.body.run_id}/result`)).status, 404);
+  });
+
+  test("a template is filled in on this machine's clock and shown in run.started", async () => {
+    const created = await call("POST", "/v1/runs", {
+      body: {
+        prompt: "It is {{now_text}} ({{time_zone}}). Week {{week_start}} to {{week_start:+4}}. Read {{connectors}}.",
+        system_prompt: "Today is {{today}}.",
+        connectors: "all",
+        template: { week_offset: 1 },
+      },
+    });
+    assert.equal(created.status, 201);
+    await finished(created.body.run_id);
+    const spec = adapter.specs.at(-1)!;
+    assert.doesNotMatch(spec.prompt, /\{\{/);
+    assert.match(spec.prompt, /Read Gmail\.$/);
+    assert.match(spec.systemPrompt, /Today is \d{4}-\d{2}-\d{2}\.$/);
+    const vars = spec.templateVars!;
+    assert.equal(vars.time_zone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+    assert.equal(new Date(`${vars.week_start}T00:00:00Z`).getUTCDay(), 1);
+    const started = runs.get(created.body.run_id)!.events[0]!;
+    assert.equal(started.type, "run.started");
+    assert.deepEqual((started.data as { templateVars?: unknown }).templateVars, vars);
+  });
+
+  test("an unknown template variable is invalid_template; without template nothing is filled", async () => {
+    const bad = await call("POST", "/v1/runs", { body: { prompt: "Hi {{user_email}}", template: {} } });
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "invalid_template");
+    assert.deepEqual(bad.body.error.details, { variable: "user_email" });
+
+    const plain = await call("POST", "/v1/runs", { body: { prompt: "Keep {{now}} as is" } });
+    assert.equal(plain.status, 201);
+    await finished(plain.body.run_id);
+    assert.equal(adapter.specs.at(-1)!.prompt, "Keep {{now}} as is");
+  });
+
+  test("a stored result is kept per origin, failures don't hide the latest result", async () => {
+    const key = "u_1:briefing";
+    const store = { key, meta: { task_id: "briefing", task_version: 3, input: { weekStart: "2026-10-19" } } };
+    const created = await call("POST", "/v1/runs", {
+      body: { prompt: "Brief {{today}}", output_schema: { type: "object" }, template: {}, store },
+    });
+    await finished(created.body.run_id);
+
+    const listed = await call("GET", "/v1/results");
+    assert.equal(listed.status, 200);
+    const summary = listed.body.results.find((item: any) => item.key === key);
+    assert.equal(summary.status, "completed");
+    assert.equal(summary.trigger, "manual");
+    assert.deepEqual(summary.meta, store.meta);
+
+    const kept = await call("GET", `/v1/results/${encodeURIComponent(key)}`);
+    assert.equal(kept.status, 200);
+    assert.equal(kept.body.latest.run_id, created.body.run_id);
+    assert.deepEqual(kept.body.latest.output, { dueDate: "2026-10-24", openItems: 2 });
+    assert.deepEqual(kept.body.latest.meta, store.meta);
+    assert.match(kept.body.latest.vars.today, /^\d{4}-\d{2}-\d{2}$/);
+    assert.equal(kept.body.last_failure, null);
+
+    const failed = await call("POST", "/v1/runs", { body: { prompt: "[fail]", store } });
+    await finished(failed.body.run_id);
+    const after = await call("GET", `/v1/results/${encodeURIComponent(key)}`);
+    assert.equal(after.body.latest.run_id, created.body.run_id);
+    assert.equal(after.body.last_failure.run_id, failed.body.run_id);
+    assert.equal(after.body.last_failure.error.code, "provider_api_error");
+
+    const other = { token: otherToken, origin: OTHER_ORIGIN };
+    assert.equal((await call("GET", `/v1/results/${encodeURIComponent(key)}`, other)).status, 404);
+    assert.equal((await call("GET", "/v1/results", other)).body.results.length, 0);
+
+    assert.equal((await call("GET", "/v1/results/bad%20key")).body.error.code, "invalid_key");
+    assert.equal((await call("DELETE", `/v1/results/${encodeURIComponent(key)}`)).status, 204);
+    assert.equal((await call("GET", `/v1/results/${encodeURIComponent(key)}`)).status, 404);
+  });
+
+  test("store.meta has a size limit", async () => {
+    const reply = await call("POST", "/v1/runs", {
+      body: { prompt: "Hi", store: { key: "big", meta: { blob: "x".repeat(9000) } } },
+    });
+    assert.equal(reply.status, 400);
+    assert.equal(reply.body.error.code, "invalid_request");
+  });
+
+  test("/v1/link links with the caller's origin", async () => {
+    assert.equal((await call("GET", "/v1/link", { token: "" })).status, 401);
+    const view = await call("GET", "/v1/link");
+    assert.equal(view.status, 200);
+    assert.equal(view.body.active_run, null);
+    const linked = await call("POST", "/v1/link", { body: { enrollment_token: "abc", device_name: "Mac" } });
+    assert.equal(linked.status, 200);
+    assert.deepEqual(linkCalls.at(-1), [ORIGIN, "/api", "abc", "Mac"]);
+    assert.equal((await call("DELETE", "/v1/link")).status, 204);
+    assert.deepEqual(linkCalls.at(-1), ["unlink"]);
+  });
+
+  test("the link's runs are visible to browsers of the link's origin only", async () => {
+    const run = runs.create({ sessionId: "s", persisted: false, ownerId: "link", origin: ORIGIN, provider: "claude" });
+    try {
+      assert.equal((await call("GET", `/v1/runs/${run.id}`)).status, 200);
+      assert.equal((await call("POST", `/v1/runs/${run.id}/tickets`)).status, 200);
+      const other = await call("GET", `/v1/runs/${run.id}`, { token: otherToken, origin: OTHER_ORIGIN });
+      assert.equal(other.status, 404);
+      assert.equal((await call("POST", `/v1/runs/${run.id}/cancel`)).status, 202);
+    } finally {
+      run.emit("stream.done", {});
+    }
   });
 });

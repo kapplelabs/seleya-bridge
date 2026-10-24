@@ -5,12 +5,16 @@
  *   seleya-bridge [start] [--port <n>] [--allow-origin <origin>]...   run the bridge
  *   seleya-bridge revoke                                              forget every paired browser
  *   seleya-bridge config                                              print the config path
+ *   seleya-bridge link                                                show the link to a Seleya account
+ *   seleya-bridge unlink                                              unlink from the Seleya account
  */
 import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
 import { startBridge } from "./bridge.ts";
 import { bridgeHome, configPath, isLoopbackOrigin } from "./config.ts";
+import { unlinkStored } from "./link/client.ts";
+import { LinkStore } from "./link/store.ts";
 import type { ConnectorSet } from "./providers/claude/connectors.ts";
 import { TokenStore, type PairingCode } from "./pairing.ts";
 
@@ -24,6 +28,8 @@ Usage:
   seleya-bridge [start] [--port <n>] [--allow-origin <origin>]...
   seleya-bridge revoke     forget every paired browser
   seleya-bridge config     print the config file path
+  seleya-bridge link       show the link to a Seleya account and its schedules
+  seleya-bridge unlink     unlink from the Seleya account (run with the bridge stopped)
 `;
 
 function announceCode({ code, origin }: PairingCode): void {
@@ -52,6 +58,7 @@ function announceConnectors(found: ConnectorSet): void {
 async function start(port: number | undefined, allowOrigins: string[]): Promise<void> {
   const bridge = await startBridge({
     version: VERSION,
+    distribution: "cli",
     overrides: { port, allowOrigins },
     listener: { code: announceCode, locked: announceLocked, connectors: announceConnectors },
   }).catch((error: unknown) => {
@@ -82,6 +89,24 @@ async function start(port: number | undefined, allowOrigins: string[]): Promise<
   process.on("SIGTERM", shutdown);
 }
 
+/** What link.json and link-config.json say; the bridge needn't be running. */
+function printLink(): void {
+  const store = new LinkStore(bridgeHome());
+  const link = store.link();
+  if (!link) return void console.log("Not linked to a Seleya account. Link it from Seleya's AI providers page.");
+  console.log(`Linked to Seleya at ${link.server} as "${link.deviceName}" (user ${link.userId}) since ${link.linkedAt}`);
+  const schedules = store.config()?.schedules ?? [];
+  if (schedules.length === 0) return void console.log("  no schedules");
+  const state = store.scheduleState();
+  for (const schedule of schedules) {
+    const last = state.schedules[schedule.id]?.lastRun;
+    console.log(
+      `  ${schedule.enabled ? "on " : "off"} ${schedule.name}` +
+        (last ? ` · last run ${last.at}: ${last.status}${last.code ? ` (${last.code})` : ""}` : ""),
+    );
+  }
+}
+
 function main(): void {
   const { values, positionals } = parseArgs({
     allowPositionals: true,
@@ -105,6 +130,12 @@ function main(): void {
     }
     case "config":
       return void console.log(configPath());
+    case "link":
+      return printLink();
+    case "unlink":
+      return void unlinkStored(new LinkStore(bridgeHome())).then((unlinked) =>
+        console.log(unlinked ? "Unlinked from Seleya. Kept results stay." : "This bridge isn't linked to Seleya."),
+      );
     default:
       console.error(`Unknown command "${command}"\n\n${HELP}`);
       process.exit(1);

@@ -157,6 +157,7 @@ trông như không tồn tại.
 ```jsonc
 {
   "bridge_version": "0.1.0",
+  "distribution": "app",               // "app" (Seleya Bridge.app) | "cli": để Seleya chỉ đúng cách cập nhật
   "time_zone": "Asia/Ho_Chi_Minh",     // múi giờ của máy, để Seleya viết prompt có ngày giờ
   "default_provider": "claude",
   "providers": [
@@ -198,7 +199,8 @@ trông như không tồn tại.
 - Claude chưa có cách kiểm tra đăng nhập trước khi chạy: adapter báo `ready` khi có binary, và một run
   thất bại vì đăng nhập trả `provider_auth_required` (§7).
 - Lỗi chi tiết của connector (`error`) vẫn chỉ ở terminal / app của bridge, như hiện nay.
-- `GET /v1/health` bỏ `connectors` (đã có trong `capabilities`), giữ `name`, `version`, `paired`, `busy`.
+- `GET /v1/health` bỏ `connectors` (đã có trong `capabilities`), giữ `name`, `version`, `paired`, `busy`, và thêm
+  `distribution` (như trong `capabilities`), để Seleya so version và nhắc cập nhật cả khi chưa pair.
 
 ### 5.2 `POST /v1/runs`
 

@@ -298,6 +298,8 @@ const config = {
   defaultProvider: "claude",
   models: ["claude-opus"],
   limits: { maxTurns: 60, maxToolOutputTokens: 100_000 },
+  results: { retentionDays: 14, maxKeys: 200 },
+  link: { enabled: true, connectors: "all", maxRunsPerDay: 24, minIntervalMinutes: 30 },
   claudeExecutable: "/bin/claude",
   connectors: "auto",
   home: "/tmp/home",
@@ -317,7 +319,11 @@ const connectors: ConnectorSet = {
   skipped: [],
 };
 
-const newRun = () => new Run({ sessionId: "s1", persisted: false, ownerId: "o1", provider: "claude" }, () => {});
+const newRun = () =>
+  new Run(
+    { sessionId: "s1", persisted: false, origin: "https://seleya.example.com", ownerId: "o1", provider: "claude" },
+    () => {},
+  );
 
 const baseSpec: RunSpec = {
   prompt: "hi",

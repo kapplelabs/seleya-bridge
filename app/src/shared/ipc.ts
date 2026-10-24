@@ -34,6 +34,30 @@ export interface ConnectorState {
   error?: string;
 }
 
+export interface ScheduleState {
+  id: string;
+  name: string;
+  enabled: boolean;
+  /** ISO time of the next run; unset when off. */
+  nextRunAt?: string;
+  lastRun?: { status: "started" | "completed" | "failed" | "skipped" | "cancelled"; code?: string; at: string };
+}
+
+/** The link to a Seleya account (docs/server-link.md §6.6). */
+export interface LinkPanelState {
+  linked: boolean;
+  state: "unlinked" | "connecting" | "online" | "offline" | "revoked";
+  deviceName?: string;
+  /** The Seleya site it is linked to, e.g. seleya.example.com. */
+  server?: string;
+  lastSyncAt?: string;
+  /** link.enabled is off in config.json: no polling, no scheduled runs. */
+  paused: boolean;
+  schedules: ScheduleState[];
+  /** The schedule whose run is in progress. */
+  activeScheduleId?: string;
+}
+
 export interface BridgeState {
   status: BridgeStatus;
   error?: BridgeError;
@@ -54,6 +78,7 @@ export interface BridgeState {
     skipped: string[];
   };
   openAtLogin: boolean;
+  link: LinkPanelState;
 }
 
 /** The config.json keys the Settings tab edits. */
@@ -88,6 +113,10 @@ export interface BridgeApi {
   getLog: () => Promise<string[]>;
   /** Copies the pending pairing code, then hides the panel so the browser, where it's pasted, comes back. */
   copyCode: () => Promise<void>;
+  /** Unlinks from the Seleya account; kept results stay. */
+  unlink: () => Promise<void>;
+  /** Turns scheduled runs off or on (link.enabled) and restarts the bridge. */
+  setSchedulesPaused: (paused: boolean) => Promise<SaveResult>;
 }
 
 /** IPC channel names, shared by main and preload. */
@@ -105,6 +134,8 @@ export const CHANNELS = {
   openConfigFile: "bridge:open-config-file",
   getLog: "bridge:get-log",
   copyCode: "bridge:copy-code",
+  unlink: "bridge:unlink",
+  setSchedulesPaused: "bridge:set-schedules-paused",
 } as const;
 
 declare global {

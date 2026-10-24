@@ -36,6 +36,16 @@ export interface RunSummary {
   redactions: number;
 }
 
+/** What started a run: a browser, or the server link's scheduler (docs/server-link.md §6.4). */
+export type RunTrigger = "manual" | "schedule" | "catch_up" | "remote";
+
+/** Where a run's outcome is kept (docs/server-link.md §6.2). */
+export interface RunStore {
+  key: string;
+  /** Seleya's own note about the result, given back as it was sent. */
+  meta: Record<string, unknown>;
+}
+
 export interface RunInit {
   /** The provider session (Claude Code session id), always the bridge's own. */
   sessionId: string;
@@ -43,7 +53,14 @@ export interface RunInit {
   persisted: boolean;
   /** The paired browser (token record id) that started the run: the only one that may read or stop it. */
   ownerId: string;
+  /** The origin of the caller; the server link's runs carry the origin it was linked from. */
+  origin: string;
   provider: ProviderId;
+  trigger?: RunTrigger;
+  /** The schedule a server link run belongs to. */
+  scheduleId?: string;
+  store?: RunStore;
+  templateVars?: Record<string, string>;
 }
 
 export class Run {
@@ -55,7 +72,12 @@ export class Run {
   readonly sessionId: string;
   readonly persisted: boolean;
   readonly ownerId: string;
+  readonly origin: string;
   readonly provider: ProviderId;
+  readonly trigger: RunTrigger;
+  readonly scheduleId: string | undefined;
+  readonly store: RunStore | undefined;
+  readonly templateVars: Record<string, string> | undefined;
   readonly events: RunEvent[] = [];
   /** The final answer, redacted; set when the run completes. */
   text: string | undefined;
@@ -68,11 +90,16 @@ export class Run {
   private readonly listeners = new Set<Listener>();
   private onFinish: (() => void) | undefined;
 
-  constructor({ sessionId, persisted, ownerId, provider }: RunInit, onFinish: () => void) {
-    this.sessionId = sessionId;
-    this.persisted = persisted;
-    this.ownerId = ownerId;
-    this.provider = provider;
+  constructor(init: RunInit, onFinish: () => void) {
+    this.sessionId = init.sessionId;
+    this.persisted = init.persisted;
+    this.ownerId = init.ownerId;
+    this.origin = init.origin;
+    this.provider = init.provider;
+    this.trigger = init.trigger ?? "manual";
+    this.scheduleId = init.scheduleId;
+    this.store = init.store;
+    this.templateVars = init.templateVars;
     this.onFinish = onFinish;
   }
 
@@ -120,6 +147,11 @@ export class RunRegistry {
   /** One run at a time: the provider works on this machine, and a second caller shouldn't pile on. */
   get busy(): boolean {
     return this.active !== undefined;
+  }
+
+  /** The run holding `busy`, if any. */
+  get current(): Run | undefined {
+    return this.active;
   }
 
   create(init: RunInit): Run {
