@@ -38,6 +38,9 @@ export interface ArgsInput {
   prompt: string;
   folder: string;
   timeLimitS: number;
+  /** A conversation to continue; only passed to a definition that `canResume`. */
+  resume?: string;
+  effort?: "low" | "medium" | "high";
 }
 
 /** Everything that differs between CLI harnesses; the behaviour around it is shared. */
@@ -47,6 +50,8 @@ export interface CliDefinition {
   kind: "builtin" | "descriptor";
   command: string;
   args: (input: ArgsInput) => string[];
+  /** Its `args` continue `resume` when given one. */
+  canResume?: boolean;
   stream: StreamKind;
   /** Media kinds it can make (spec 008). */
   capabilities: string[];
@@ -100,28 +105,37 @@ export class CliHarness implements Harness {
         prompt: input.prompt,
         folder: input.folder,
         timeLimitS: Math.ceil(input.skill.timeLimitMs / 1000),
+        resume: definition.canResume ? input.resume : undefined,
+        effort: input.effort,
       }),
       cwd: input.folder,
-      logFile: path.join(input.folder, "harness.log"),
+      logFile: input.logFile ?? path.join(input.folder, "harness.log"),
     });
     const listeners: ((activity: HarnessActivity) => void)[] = [];
     const errors: string[] = [];
     let outcome: { ok: boolean; text?: string } | undefined;
     let denied: string | undefined;
+    let session: string | undefined;
 
     proc.onLine((line) => {
       const parsed = parse(line);
       if (parsed.error) errors.push(parsed.error);
       if (parsed.denied) denied = parsed.denied;
       if (parsed.outcome) outcome = parsed.outcome;
+      if (parsed.session) session = parsed.session;
       for (const activity of parsed.activity) for (const listener of listeners) listener(activity);
     });
 
     const exited: Promise<HarnessExit> = proc.exited.then(({ code, stderr }) => {
       if (outcome?.ok || (!outcome && code === 0 && errors.length === 0))
         return denied
-          ? { ok: true, code: "denied", message: deniedMessage(definition.name, denied, input.folder) }
-          : { ok: true };
+          ? {
+              ok: true,
+              code: "denied",
+              message: deniedMessage(definition.name, denied, input.folder),
+              session,
+            }
+          : { ok: true, session, text: outcome?.text };
       const text = [outcome?.text, ...errors, stderr].filter(Boolean).join("\n");
       const failure = code === 127 && !outcome ? "crashed" : classifyFailure(text);
       return {

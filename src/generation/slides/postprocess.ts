@@ -5,7 +5,7 @@ import { checkFacts, checkLayout, checkVisualText } from "../creative/checks.ts"
 import { requestText } from "../creative/postprocess.ts";
 import { findDelivered } from "../media/catalog.ts";
 import { containedPath } from "../paths.ts";
-import type { ChromeRenderer } from "../render/chrome.ts";
+import type { ChromeRenderer, RenderResult } from "../render/chrome.ts";
 import { recognizeText } from "../render/ocr.ts";
 import type {
   DraftRenderer,
@@ -97,6 +97,9 @@ export interface RenderedDeck {
   checks: CheckResult[];
 }
 
+/** Text scales tried, in order, before an overflowing slide goes back to the agent. */
+const FIT_STEPS = [1, 0.92, 0.84];
+
 /** Renders every slide (PNG), checks overflow and facts, and writes the deck PDF. */
 export async function renderDeck(
   renderer: ChromeRenderer,
@@ -116,10 +119,6 @@ export async function renderDeck(
   for (const [index, slide] of deck.slides.entries()) {
     const number = index + 1;
     const html = path.join(dir, `${pad(number)}.html`);
-    writeFileSync(
-      html,
-      slideHtml(slide, deck, number, deck.slides.length, imageFor(folder, slide)),
-    );
     htmlFiles.push(html);
     pdfPages.push(html);
     const notes = notesHtml(slide, deck, number, deck.slides.length);
@@ -128,16 +127,27 @@ export async function renderDeck(
       writeFileSync(notesFile, notes);
       pdfPages.push(notesFile);
     }
-    const result = await renderer.render(html, SLIDE_WIDTH, SLIDE_HEIGHT, {});
+    // A slide whose text does not fit is first scaled down a little by Seleya: asking the agent to
+    // shorten it cost a whole correction round and often still failed (docs/generation-performance.md).
+    let result: RenderResult | undefined;
+    let fits = false;
+    for (const fit of FIT_STEPS) {
+      writeFileSync(
+        html,
+        slideHtml(slide, deck, number, deck.slides.length, imageFor(folder, slide), fit),
+      );
+      result = await renderer.render(html, SLIDE_WIDTH, SLIDE_HEIGHT, {});
+      fits = checkLayout(
+        result.boxes,
+        { width: result.scrollWidth, height: result.scrollHeight },
+        { width: SLIDE_WIDTH, height: SLIDE_HEIGHT },
+      ).passed;
+      if (fits) break;
+    }
     const png = path.join("out", "slides", `${pad(number)}.png`);
-    writeFileSync(path.join(folder, png), result.png);
+    writeFileSync(path.join(folder, png), result!.png);
     outputs.push({ path: png, kind: "png", slot: `slide-${number}`, state: "final" });
-    const layout = checkLayout(
-      result.boxes,
-      { width: result.scrollWidth, height: result.scrollHeight },
-      { width: SLIDE_WIDTH, height: SLIDE_HEIGHT },
-    );
-    if (!layout.passed)
+    if (!fits)
       findings.push(
         `Slide ${number} ("${slide.heading.slice(0, 50)}") does not fit: shorten its text (fewer or shorter bullets, at most 6 bullets of about 12 words) in out/slides/${pad(number)}.json and out/deck.json.`,
       );
@@ -203,6 +213,7 @@ export function slidesPostProcessor(renderer: ChromeRenderer, home?: string): Po
   return async (context: PostProcessContext): Promise<PostProcessResult> => {
     const { folder, run, step, emit } = context;
     let rendered: RenderedDeck;
+    let lastFound = "";
     for (let attempt = 0; ; attempt++) {
       const deck = loadDeck(folder);
       if (deck.slides.length === 0) throw new Error("the skill wrote no slides (out/deck.json)");
@@ -228,6 +239,10 @@ export function slidesPostProcessor(renderer: ChromeRenderer, home?: string): Po
         failing.length ? `${failing.length} check(s) need a fix` : "All checks passed",
       );
       if (failing.length === 0 || attempt >= MAX_CORRECTIONS) break;
+      // A fix that changed nothing the checks see will not do better the second time.
+      const found = JSON.stringify(failing.map((check) => check.findings));
+      if (found === lastFound) break;
+      lastFound = found;
       const endFix = step(`Fixing what the checks found (${attempt + 1}/${MAX_CORRECTIONS})`);
       const exit = await context.runAgain(
         [

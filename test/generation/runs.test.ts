@@ -119,3 +119,27 @@ test("an agent that exits without a result fails the run with a plain reason", a
     await t.cleanup();
   }
 });
+
+test("files the agent writes in out/ show as drafts without being announced; earlier ones do not", async () => {
+  const t = makeTestApp();
+  try {
+    const script: ScriptAction[] = [
+      { write: "out/brief.json", content: '{"headline":"Hi"}' },
+      { step: "Producing", status: "active" },
+      { write: "out/slides/02.json", content: '{"heading":"Two"}' },
+      { step: "Producing", status: "active" },
+      { step: "Producing", status: "done" },
+      { manifest: { skill: "_scripted" } },
+      { exit: "ok" },
+    ];
+    const run = t.app.manager.create({ skill: "_scripted", title: "Drafts", request: { script } });
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus));
+    const drafts = eventsOf(t.app, run.id)
+      .filter((event) => event.type === "seleya.output.draft")
+      .map((event) => (event.data as { slot?: string }).slot);
+    assert.ok(drafts.includes("brief"), "out/brief.json shown as the brief");
+    assert.ok(drafts.includes("slide-2"), "out/slides/02.json shown as slide 2");
+  } finally {
+    await t.cleanup();
+  }
+});

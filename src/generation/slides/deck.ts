@@ -261,6 +261,8 @@ export function slideHtml(
   number: number,
   total: number,
   imageSrc?: string,
+  /** Below 1: the text is scaled down to fit (Seleya's own fix for a slide that overflows). */
+  fit = 1,
 ): string {
   const theme = THEMES[deck.theme];
   const fonts =
@@ -373,6 +375,6 @@ blockquote{margin:0;font-family:${theme.display},Arial,sans-serif;font-size:44px
 .footer{position:absolute;left:${pad}px;right:${pad}px;bottom:30px;display:flex;justify-content:space-between;align-items:center;color:${theme.muted};font-size:15px;letter-spacing:.04em}
 .on-image .footer{color:rgba(255,255,255,.78)}
 .split ~ .footer{display:none}
-.progress{position:absolute;left:0;bottom:0;height:5px;width:${((number / Math.max(total, 1)) * 100).toFixed(2)}%;background:linear-gradient(90deg,${theme.accent},${theme.accent2})}
+.progress{position:absolute;left:0;bottom:0;height:5px;width:${((number / Math.max(total, 1)) * 100).toFixed(2)}%;background:linear-gradient(90deg,${theme.accent},${theme.accent2})}${fit < 1 ? `\n.stack,.center,.cover-copy,.copy,.full-copy{zoom:${fit}}` : ""}
 </style></head><body><div class="slide${onImage ? " on-image" : ""}">${content}<div class="footer"><span>${escape(deck.title)}</span><span>${index} / ${String(total).padStart(2, "0")}</span></div><div class="progress"></div></div></body></html>`;
 }

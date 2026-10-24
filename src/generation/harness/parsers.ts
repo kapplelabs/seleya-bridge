@@ -12,6 +12,8 @@ export interface ParsedLine {
   error?: string;
   /** An action the harness's own permission check refused, e.g. `read_file(/abs/path)`. */
   denied?: string;
+  /** The agent's conversation id, to continue it later (a correction resumes it warm). */
+  session?: string;
 }
 
 export type StreamKind = "antigravity" | "claude" | "codex" | "lines";
@@ -69,9 +71,11 @@ export function parseAntigravity(line: string): ParsedLine {
       return { activity: [{ kind: "text", text: step.text_delta }] };
     return empty();
   }
+  if (value.event === "init") return { activity: [], session: str(value.conversation_id) };
   if (value.event === "result" && isObject(value.result)) {
     const status = str(value.result.status) ?? "";
     return {
+      session: str(value.result.conversation_id),
       activity: [],
       outcome: { ok: /success|ok/i.test(status), text: str(value.result.response) ?? status },
     };
@@ -133,9 +137,12 @@ export function parseClaude(line: string): ParsedLine {
       ),
     };
   }
+  if (value.type === "system" && value.subtype === "init")
+    return { activity: [], session: str(value.session_id) };
   if (value.type === "result") {
     const text = str(value.result) ?? str(value.subtype) ?? "";
     return {
+      session: str(value.session_id),
       activity: [],
       outcome: { ok: value.is_error !== true, text },
       error: value.is_error === true ? text : undefined,

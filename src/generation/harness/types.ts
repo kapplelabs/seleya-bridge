@@ -16,6 +16,10 @@ export type HarnessActivity =
 
 export interface HarnessExit {
   ok: boolean;
+  /** The agent's final answer, when its stream reports one (the pipeline reads it as JSON). */
+  text?: string;
+  /** The conversation this agent had, when its harness can continue one (`HarnessStartInput.resume`). */
+  session?: string;
   /** Plain-language cause for the user (spec 002 FR-012): not_signed_in, usage_limit, crashed… */
   code?: string;
   message?: string;
@@ -31,6 +35,15 @@ export interface HarnessStartInput {
   request: Record<string, unknown>;
   /** Media kinds this task must make (spec 008); a multi-agent harness picks a worker by it. */
   needs?: string[];
+  /**
+   * A conversation to continue instead of starting cold: the agent already knows the procedure and
+   * what it made, so a correction needs no reading (docs/generation-performance.md).
+   */
+  resume?: string;
+  /** Reasoning effort, where the harness has the setting: small follow-ups need little. */
+  effort?: "low" | "medium" | "high";
+  /** Where the raw output goes; default `harness.log` in the folder. */
+  logFile?: string;
 }
 
 export interface HarnessHandle {

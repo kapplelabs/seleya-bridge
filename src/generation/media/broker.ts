@@ -88,7 +88,21 @@ export interface BrokerContext {
   draft: (output: RunOutput) => void;
 }
 
-export function mediaPrompt(kind: string): string {
+/**
+ * The media task's instruction. With the folder, the procedure and the jobs are written out in it,
+ * so the agent starts making at once: reading them cost a picture agent ~5 turns before it began
+ * (docs/generation-perf-log.md, p1).
+ */
+export function mediaPrompt(kind: string, folder?: string, jobs?: unknown[]): string {
+  const skill = folder ? path.join(folder, "skills", "_media", "SKILL.md") : undefined;
+  if (skill && existsSync(skill) && jobs)
+    return [
+      `You make ${pluralOf(kind)} for Seleya. Everything you need is below: do not open, list or search any file. Work only inside the current folder.`,
+      readFileSync(skill, "utf8").replace(/^---\n[\s\S]*?\n---\n?/, "").trim(),
+      `Kind: ${kind}. Your jobs (also in out/media/jobs-${kind}.json):`,
+      JSON.stringify(jobs, null, 2),
+      "Start the first job now.",
+    ].join("\n\n");
   return [
     "Read skills/_media/SKILL.md and follow it exactly.",
     `Kind: ${kind}. Your jobs are in out/media/jobs-${kind}.json.`,
@@ -182,17 +196,8 @@ async function runAgent(
 ): Promise<Map<string, string>> {
   const dir = path.join(context.folder, MEDIA_DIR);
   const extensions = MEDIA_KINDS[kind]?.extensions ?? [];
-  writeFileSync(
-    path.join(dir, `jobs-${kind}.json`),
-    JSON.stringify(
-      jobs.map((job) => ({
-        ...job,
-        save_as: `out/media/${job.id}.${extensions[0]}`,
-      })),
-      null,
-      2,
-    ),
-  );
+  const listed = jobs.map((job) => ({ ...job, save_as: `out/media/${job.id}.${extensions[0]}` }));
+  writeFileSync(path.join(dir, `jobs-${kind}.json`), JSON.stringify(listed, null, 2));
   // A job means "make it anew": an older file of the same id must not count as delivered.
   for (const job of jobs) {
     for (const extension of extensions)
@@ -205,7 +210,7 @@ async function runAgent(
   const sizes = new Map<string, number>();
   let handle: HarnessHandle;
   try {
-    handle = context.start(agent, mediaPrompt(kind), [kind]);
+    handle = context.start(agent, mediaPrompt(kind, context.folder, listed), [kind]);
   } catch (error) {
     end("failed", error instanceof Error ? error.message : String(error));
     return made;

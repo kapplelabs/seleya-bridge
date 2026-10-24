@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 
+import { antigravity, claudeCode } from "../../src/generation/harness/builtins.ts";
 import { classifyFailure } from "../../src/generation/harness/classify.ts";
 import { parseDescriptor } from "../../src/generation/harness/descriptor.ts";
 import { parseAntigravity, parseClaude, parseCodex, type ParsedLine } from "../../src/generation/harness/parsers.ts";
@@ -124,4 +125,20 @@ test("descriptors: every known bypass spelling and shell wrappers are rejected",
   assert.doesNotThrow(() =>
     parseDescriptor({ id: "ok", start: { command: "agent", args: ["--yes-color", "{prompt}"] } }),
   );
+});
+
+test("the conversation id is read from the stream, and a resume continues it", () => {
+  assert.equal(parseAntigravity('{"event":"init","conversation_id":"c-1","init":{}}').session, "c-1");
+  assert.equal(
+    parseAntigravity('{"event":"result","result":{"conversation_id":"c-1","status":"SUCCESS"}}').session,
+    "c-1",
+  );
+  assert.equal(parseClaude('{"type":"system","subtype":"init","session_id":"s-1"}').session, "s-1");
+  const base = { prompt: "Fix it", folder: "/tmp/run", timeLimitS: 60 };
+  const resumed = antigravity.definition.args({ ...base, resume: "c-1", effort: "low" });
+  assert.ok(resumed.join(" ").includes("--conversation c-1"));
+  assert.ok(!resumed.includes("--new-project"), "a continued conversation keeps its project");
+  assert.ok(resumed.join(" ").includes("--model gemini-3.8-flash-low"), "the effort picks the model id");
+  assert.ok(antigravity.definition.args(base).includes("--new-project"));
+  assert.ok(claudeCode.definition.args({ ...base, resume: "s-1" }).join(" ").includes("--resume s-1"));
 });

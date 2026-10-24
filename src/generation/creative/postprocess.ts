@@ -5,7 +5,12 @@ import { containedPath } from "../paths.ts";
 import type { ChromeRenderer, RenderResult } from "../render/chrome.ts";
 import { recognizeText } from "../render/ocr.ts";
 import { decodePng } from "../render/png.ts";
-import type { PostProcessContext, PostProcessor, PostProcessResult } from "../runs/runner.ts";
+import type {
+  DraftRenderer,
+  PostProcessContext,
+  PostProcessor,
+  PostProcessResult,
+} from "../runs/runner.ts";
 import type { CheckResult, RunOutput } from "../runs/types.ts";
 import {
   checkContrast,
@@ -17,6 +22,7 @@ import {
   checkVisualText,
 } from "./checks.ts";
 import type { SkillMeta } from "../skills.ts";
+import { saveLayout } from "./edit.ts";
 import { type Usecase, usecaseFor } from "./usecases.ts";
 
 const MAX_CORRECTIONS = 2;
@@ -144,6 +150,15 @@ export function requestText(request: Record<string, unknown>): string {
   return parts.join("\n");
 }
 
+/**
+ * The text whose quotes must appear verbatim. An edit may replace text the first request quoted
+ * ("change the headline to …"): only the edit's own quotes count. Requiring the old ones made a
+ * 352 s correction that put the replaced headline back (docs/generation-perf-log.md, r0).
+ */
+export function quotedText(request: Record<string, unknown>): string {
+  return typeof request.edit_instruction === "string" ? request.edit_instruction : requestText(request);
+}
+
 interface Rendered {
   page: ManifestPage;
   result: RenderResult;
@@ -167,6 +182,7 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
     let manifest = readManifest(context.manifest, usecase?.pages[0] ?? "design");
     let checks: CheckResult[];
     let rendered: Rendered[];
+    let lastFound = "";
 
     for (let attempt = 0; ; attempt++) {
       if (manifest.pages.length === 0)
@@ -214,6 +230,10 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
         failing.length ? `${failing.length} check(s) need a fix` : "All checks passed",
       );
       if (failing.length === 0 || attempt >= MAX_CORRECTIONS) break;
+      // A fix that changed nothing the checks see will not do better the second time.
+      const found = JSON.stringify(failing.map((check) => check.findings));
+      if (found === lastFound) break;
+      lastFound = found;
 
       const endFix = step(`Fixing what the checks found (${attempt + 1}/${MAX_CORRECTIONS})`);
       const exit = await context.runAgain(correctionPrompt(failing, size));
@@ -228,6 +248,16 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
     }
 
     const outputs = await publish(rendered, manifest, usecase, folder, size, renderer);
+    // What later edits need to know which texts a marked area holds.
+    saveLayout(folder, {
+      pages: rendered.map(({ page, result }) => ({
+        name: page.name,
+        html: page.html,
+        width: size.width,
+        height: size.height,
+        boxes: result.boxes.map(({ text, x, y, width, height }) => ({ text, x, y, width, height })),
+      })),
+    });
     const passed = checks.every((check) => check.passed);
     return {
       outputs,
@@ -257,7 +287,7 @@ async function runChecks(
 ): Promise<CheckResult[]> {
   const text = rendered.map((item) => item.result.text).join("\n");
   const source = requestText(request);
-  const results: CheckResult[] = [checkFacts(text, source), checkQuotes(text, source)];
+  const results: CheckResult[] = [checkFacts(text, source), checkQuotes(text, quotedText(request))];
   const items = [
     ...strings(request.items),
     ...strings(request.contact_lines),
@@ -464,4 +494,21 @@ export async function rerenderDesign(
   );
   const outputs = await publish(rendered, manifest, usecase, folder, size, renderer);
   return { outputs, checks, changed };
+}
+
+/**
+ * While a design is being made, each page written in out/ is shown as an image (the pipeline shows
+ * it on its colours before the picture is ready, docs/generation-perf-log.md E4).
+ */
+export function pageDraftRenderer(renderer: ChromeRenderer): DraftRenderer {
+  return async (draft, folder, run) => {
+    if (!/^out\/[A-Za-z0-9_-]+\.html$/.test(draft.path)) return undefined;
+    const file = containedPath(folder, draft.path);
+    if (!file || !existsSync(file)) return undefined;
+    const size = expectedSize(run.request, undefined);
+    const result = await renderer.render(file, size.width, size.height, {});
+    const png = draft.path.replace(/\.html$/, ".draft.png");
+    writeFileSync(path.join(folder, png), result.png);
+    return { path: png, kind: "png", slot: draft.slot, state: "draft" };
+  };
 }
