@@ -49,7 +49,12 @@ export function generationJson(generation: GenerationRow, runs: RunRow[]) {
     const png = run.outputs.find(
       (output) => output.kind === "png" && output.state === "final" && output.slot !== "visual",
     );
-    if (!png) return [];
+    // Not rendered on this computer: the design is shown as its web page (creative/postprocess.ts).
+    const page = png
+      ? undefined
+      : run.outputs.find((output) => output.kind === "html" && output.state === "final");
+    const shown = png ?? page;
+    if (!shown) return [];
     const width = Number(run.request.width) || 0;
     const height = Number(run.request.height) || 0;
     return [
@@ -63,8 +68,9 @@ export function generationJson(generation: GenerationRow, runs: RunRow[]) {
         height,
         seed: Number(request.seed) || index + 1,
         version: run.attempt,
-        url: fileUrl(run.id, png.path),
-        thumbnail_url: fileUrl(run.id, png.path),
+        url: fileUrl(run.id, shown.path),
+        thumbnail_url: fileUrl(run.id, shown.path),
+        preview: page ? "html" : "image",
         files: run.outputs
           .filter((output) => output.state === "final" && output.slot !== "visual")
           .map((output) => ({

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { containedPath } from "../paths.ts";
-import type { ChromeRenderer, RenderResult } from "../render/chrome.ts";
+import { type ChromeRenderer, RenderError, type RenderResult } from "../render/chrome.ts";
 import { recognizeText } from "../render/ocr.ts";
 import { decodePng } from "../render/png.ts";
 import type {
@@ -184,69 +184,75 @@ export function creativePostProcessor(renderer: ChromeRenderer, home: string): P
     let rendered: Rendered[];
     let lastFound = "";
 
-    for (let attempt = 0; ; attempt++) {
-      if (manifest.pages.length === 0)
-        throw new Error("the skill did not say which page to render (out/result.json `pages`)");
-      const endRender = step(attempt === 0 ? "Rendering" : `Rendering again (fix ${attempt})`);
-      rendered = [];
-      for (const page of manifest.pages) {
-        const file = containedPath(folder, page.html);
-        if (!file || !existsSync(file)) throw new Error(`${page.html} does not exist`);
-        rendered.push({
-          page,
-          result: await renderer.render(file, size.width, size.height, {
-            keepTogether: manifest.keepTogether,
-          }),
-        });
+    try {
+      for (let attempt = 0; ; attempt++) {
+        if (manifest.pages.length === 0)
+          throw new Error("the skill did not say which page to render (out/result.json `pages`)");
+        const endRender = step(attempt === 0 ? "Rendering" : `Rendering again (fix ${attempt})`);
+        rendered = [];
+        for (const page of manifest.pages) {
+          const file = containedPath(folder, page.html);
+          if (!file || !existsSync(file)) throw new Error(`${page.html} does not exist`);
+          rendered.push({
+            page,
+            result: await renderer.render(file, size.width, size.height, {
+              keepTogether: manifest.keepTogether,
+            }),
+          });
+        }
+        endRender(
+          "done",
+          `${rendered.length} page${rendered.length > 1 ? "s" : ""} at ${size.width}×${size.height}`,
+        );
+
+        const endCheck = step(
+          attempt === 0 ? "Checking the design" : `Checking again (fix ${attempt})`,
+        );
+        checks = await runChecks(
+          rendered,
+          manifest,
+          usecase,
+          run.request,
+          size,
+          folder,
+          home,
+          definition,
+        );
+        for (const check of checks)
+          emit("seleya.check.result", {
+            name: check.name,
+            passed: check.passed,
+            findings: check.findings,
+            attempt,
+          });
+        const failing = checks.filter((check) => !check.passed);
+        endCheck(
+          failing.length ? "failed" : "done",
+          failing.length ? `${failing.length} check(s) need a fix` : "All checks passed",
+        );
+        if (failing.length === 0 || attempt >= MAX_CORRECTIONS) break;
+        // A fix that changed nothing the checks see will not do better the second time.
+        const found = JSON.stringify(failing.map((check) => check.findings));
+        if (found === lastFound) break;
+        lastFound = found;
+
+        const endFix = step(`Fixing what the checks found (${attempt + 1}/${MAX_CORRECTIONS})`);
+        const exit = await context.runAgain(correctionPrompt(failing, size));
+        endFix(exit.ok ? "done" : "failed", exit.ok ? undefined : exit.message);
+        if (!exit.ok) break;
+        // A correction that did not rewrite the page list keeps the pages it had.
+        const corrected = readManifest(
+          readJson(path.join(folder, "out", "result.json")) ?? {},
+          usecase?.pages[0] ?? "design",
+        );
+        manifest = corrected.pages.length ? corrected : { ...corrected, pages: manifest.pages };
       }
-      endRender(
-        "done",
-        `${rendered.length} page${rendered.length > 1 ? "s" : ""} at ${size.width}×${size.height}`,
-      );
 
-      const endCheck = step(
-        attempt === 0 ? "Checking the design" : `Checking again (fix ${attempt})`,
-      );
-      checks = await runChecks(
-        rendered,
-        manifest,
-        usecase,
-        run.request,
-        size,
-        folder,
-        home,
-        definition,
-      );
-      for (const check of checks)
-        emit("seleya.check.result", {
-          name: check.name,
-          passed: check.passed,
-          findings: check.findings,
-          attempt,
-        });
-      const failing = checks.filter((check) => !check.passed);
-      endCheck(
-        failing.length ? "failed" : "done",
-        failing.length ? `${failing.length} check(s) need a fix` : "All checks passed",
-      );
-      if (failing.length === 0 || attempt >= MAX_CORRECTIONS) break;
-      // A fix that changed nothing the checks see will not do better the second time.
-      const found = JSON.stringify(failing.map((check) => check.findings));
-      if (found === lastFound) break;
-      lastFound = found;
-
-      const endFix = step(`Fixing what the checks found (${attempt + 1}/${MAX_CORRECTIONS})`);
-      const exit = await context.runAgain(correctionPrompt(failing, size));
-      endFix(exit.ok ? "done" : "failed", exit.ok ? undefined : exit.message);
-      if (!exit.ok) break;
-      // A correction that did not rewrite the page list keeps the pages it had.
-      const corrected = readManifest(
-        readJson(path.join(folder, "out", "result.json")) ?? {},
-        usecase?.pages[0] ?? "design",
-      );
-      manifest = corrected.pages.length ? corrected : { ...corrected, pages: manifest.pages };
+    } catch (error) {
+      // No browser could render here: the person still gets the design, as a web page.
+      if (!(error instanceof RenderError)) throw error;
+      return unrenderedResult(folder, manifest, run.request, usecase, error.message);
     }
-
     const outputs = await publish(rendered, manifest, usecase, folder, size, renderer);
     // What later edits need to know which texts a marked area holds.
     saveLayout(folder, {
@@ -389,22 +395,21 @@ async function publish(
     outputs.push({ path: file, kind: "png", slot: page.name, state: "final" });
   }
   if (formats.includes("pdf")) {
-    const pdf =
+    // A PDF that cannot be printed is left out; the PNGs are already there.
+    const print = async () =>
       rendered.length === 1
-        ? (
-            await renderer.render(
-              path.join(folder, rendered[0]!.page.html),
-              size.width,
-              size.height,
-              { pdf: true },
-            )
-          ).pdf
+        ? (await renderer.render(path.join(folder, rendered[0]!.page.html), size.width, size.height, { pdf: true }))
+            .pdf
         : await renderer.pdfOfPages(
             folder,
             rendered.map((item) => path.join(folder, item.page.html)),
             size.width,
             size.height,
           );
+    const pdf = await print().catch((error: unknown) => {
+      if (error instanceof RenderError) return undefined;
+      throw error;
+    });
     if (pdf) {
       const file = path.join("out", `${usecase?.format ?? "design"}.pdf`);
       writeFileSync(path.join(folder, file), pdf);
@@ -511,4 +516,73 @@ export function pageDraftRenderer(renderer: ChromeRenderer): DraftRenderer {
     writeFileSync(path.join(folder, png), result.png);
     return { path: png, kind: "png", slot: draft.slot, state: "draft" };
   };
+}
+
+/**
+ * The result when no browser could render (docs/generation-perf-log.md): each page as a web page
+ * with its local pictures embedded (`<page>.preview.html`, viewable as it is), the checks that need
+ * no rendering, and a finding that says what is missing.
+ */
+function unrenderedResult(
+  folder: string,
+  manifest: CreativeManifest,
+  request: Record<string, unknown>,
+  usecase: Usecase | undefined,
+  reason: string,
+): PostProcessResult {
+  const outputs: RunOutput[] = [];
+  let text = "";
+  for (const page of manifest.pages) {
+    const file = containedPath(folder, page.html);
+    if (!file || !existsSync(file)) continue;
+    const html = embedPictures(readFileSync(file, "utf8"), path.dirname(file));
+    const preview = page.html.replace(/\.html$/, ".preview.html");
+    writeFileSync(path.join(folder, preview), html);
+    outputs.push({ path: preview, kind: "html", slot: page.name, state: "final" });
+    text += `${visibleText(html)}\n`;
+  }
+  if (manifest.visual && existsSync(path.join(folder, manifest.visual)))
+    outputs.push({ path: manifest.visual, kind: kindOfPicture(manifest.visual), slot: "visual", state: "final" });
+  const checks: CheckResult[] = [
+    checkFacts(text, requestText(request)),
+    checkQuotes(text, quotedText(request)),
+    {
+      name: "rendering",
+      passed: false,
+      findings: [
+        `Not rendered on this computer (${reason}). The design is shown as a web page; PNG and PDF, contrast and layout checks need Google Chrome, Chromium, Edge or Brave.`,
+      ],
+      attempt: 0,
+    },
+  ];
+  return {
+    outputs,
+    checks,
+    summary: `${usecase ? usecase.format.charAt(0).toUpperCase() + usecase.format.slice(1) : "Design"} as a web page (not rendered).`,
+  };
+}
+
+const kindOfPicture = (file: string) => (path.extname(file).slice(1).toLowerCase() || "png").replace("jpeg", "jpg");
+
+/** The page with its local pictures (`url('visual.jpg')`, `src="x.png"`) as data URLs. */
+export function embedPictures(html: string, dir: string): string {
+  return html.replace(/(url\(\s*['"]?|src=["'])([^'")\s]+\.(?:png|jpe?g|webp|svg))/gi, (match, lead: string, ref: string) => {
+    if (/^[a-z]+:/i.test(ref) || ref.startsWith("/")) return match;
+    const file = path.join(dir, ref);
+    if (!file.startsWith(dir + path.sep) || !existsSync(file)) return match;
+    const type = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", svg: "image/svg+xml" }[
+      path.extname(file).slice(1).toLowerCase()
+    ];
+    return `${lead}data:${type};base64,${readFileSync(file).toString("base64")}`;
+  });
+}
+
+/** The words a page shows (markup, styles and scripts removed), for the checks that need no render. */
+function visibleText(html: string): string {
+  return html
+    .replace(/<(style|script|head)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ");
 }

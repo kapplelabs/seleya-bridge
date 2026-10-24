@@ -871,7 +871,22 @@ export class RunRunner {
           step: (label) => this.timelineStep(label),
           draft: (file, slot) => this.showDraft(file, slot),
         });
-        if (attachPicture) later = async () => ({ changed: await attachPicture() });
+        // A picture that could not be made is said, not hidden: the result has issues and the reason.
+        if (attachPicture)
+          later = async () => {
+            const { placed, reason } = await attachPicture();
+            return placed
+              ? { changed: true }
+              : {
+                  changed: false,
+                  check: {
+                    name: "picture",
+                    passed: false,
+                    findings: [`No picture was made (${reason}). The design keeps its colours; try again later.`],
+                    attempt: 0,
+                  },
+                };
+          };
       }
       await this.finishAgent(later);
     } catch (error) {

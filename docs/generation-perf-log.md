@@ -179,3 +179,31 @@ Hướng tiếp theo (cần quota ảnh để đo):
 - p2: đưa sẵn job vào prompt của agent ảnh (đã code xong);
 - p4: chạy các job ảnh song song (mỗi ảnh một agent);
 - p5: hoàn tất deck ngay với artwork theme, gắn ảnh khi về.
+
+### Sự cố "Chrome did not start its DevTools endpoint" (2026-10-24 19:2x)
+
+**Nguyên nhân (tái hiện được):**
+- Khi bridge bị dừng (restart bằng `kill`), Chrome nó đã chạy không tắt theo. Tiến trình đó thành mồ côi (cha là `launchd`) và vẫn giữ `SingletonLock` của profile dùng chung `generation/chrome`.
+- Chrome của bridge mới thấy profile bị khoá nên in "Failed to create a ProcessSingleton … Aborting" rồi thoát.
+- Bridge chờ 10 s không thấy `DevToolsActivePort` và làm fail run.
+
+**Sửa theo lớp:**
+
+| Lớp | Thay đổi |
+|---|---|
+| Phòng | Mỗi tiến trình bridge một profile riêng (`chrome/<pid>`). Khi khởi động, dọn profile của bridge đã chết (kill Chrome mồ côi chỉ khi nó chạy đúng profile đó; xoá lock cũ, kể cả của profile dùng chung đời cũ). Chrome bị kill khi bridge thoát theo bất kỳ đường nào (`process.on("exit")`). |
+| Hồi phục | Chrome không lên thì thử lại với profile mới. Báo kèm dòng lỗi của Chrome. Chrome treo giữa chừng thì khởi động lại (đã có từ R0). |
+| Engine khác | Thử lần lượt Chrome, Chromium, Edge, Brave (macOS, Linux, Windows). |
+| Fallback | Không render được (`RenderError`) thì run không fail. |
+
+Chi tiết lớp fallback:
+- **Poster** được giao dưới dạng trang web `*.preview.html` có ảnh nhúng sẵn; Studio hiển thị trong iframe không chạy script. Check facts và trích dẫn chạy trên chữ của HTML, kèm finding "Not rendered on this computer …". Run ở trạng thái `completed_with_issues`.
+- **Slides** được giao dưới dạng nội dung deck; Writing hiển thị từ JSON.
+- **PDF** in lỗi thì bỏ PDF, vẫn giữ PNG.
+
+**Kiểm chứng:**
+- Test mới `render.test.ts` dựng một Chrome mồ côi giữ (a) profile dùng chung đời cũ và (b) profile của một bridge đã chết. Render đều thành công trong 2.6–2.9 s và Chrome mồ côi bị dừng.
+- Trên thư mục thật `/tmp/seleya-bridge-live/generation/chrome` có lock cũ: render OK 3.8 s, lock được dọn, 0 Chrome mồ côi.
+- Stop bridge giờ không còn để lại Chrome.
+- Test fallback: renderer luôn lỗi thì vẫn ra `poster.preview.html` có ảnh dạng data URL, check facts và trích dẫn pass, check rendering fail.
+- 222 test pass.

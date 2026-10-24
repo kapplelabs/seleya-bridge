@@ -5,7 +5,7 @@ import { checkFacts, checkLayout, checkVisualText } from "../creative/checks.ts"
 import { requestText } from "../creative/postprocess.ts";
 import { findDelivered } from "../media/catalog.ts";
 import { containedPath } from "../paths.ts";
-import type { ChromeRenderer, RenderResult } from "../render/chrome.ts";
+import { type ChromeRenderer, RenderError, type RenderResult } from "../render/chrome.ts";
 import { recognizeText } from "../render/ocr.ts";
 import type {
   DraftRenderer,
@@ -218,7 +218,14 @@ export function slidesPostProcessor(renderer: ChromeRenderer, home?: string): Po
       const deck = loadDeck(folder);
       if (deck.slides.length === 0) throw new Error("the skill wrote no slides (out/deck.json)");
       const endRender = step(attempt === 0 ? "Rendering" : `Rendering again (fix ${attempt})`);
-      rendered = await renderDeck(renderer, folder, deck, run.request, home);
+      try {
+        rendered = await renderDeck(renderer, folder, deck, run.request, home);
+      } catch (error) {
+        // No browser could render here: the deck's content is still the result (Writing shows it).
+        if (!(error instanceof RenderError)) throw error;
+        endRender("failed", "Not rendered on this computer");
+        return unrenderedDeck(folder, deck, run.request, error.message);
+      }
       endRender("done", `${deck.slides.length} slides and a PDF`);
       const endCheck = step(
         attempt === 0 ? "Checking the slides" : `Checking again (fix ${attempt})`,
@@ -292,5 +299,30 @@ export function slideDraftRenderer(renderer: ChromeRenderer): DraftRenderer {
     const png = path.join("out", "slides", `${pad(number)}.draft.png`);
     writeFileSync(path.join(folder, png), result.png);
     return { path: png, kind: "png", slot: draft.slot, state: "draft" };
+  };
+}
+
+/** The result when no browser could render: the deck's content, and the checks that need no render. */
+function unrenderedDeck(
+  folder: string,
+  deck: Deck,
+  request: Record<string, unknown>,
+  reason: string,
+): PostProcessResult {
+  writeFileSync(path.join(folder, "out", "deck.json"), JSON.stringify(deck, null, 2));
+  return {
+    outputs: [{ path: "out/deck.json", kind: "json", slot: "content", state: "final" }],
+    checks: [
+      { ...checkFacts(deckContentText(deck), slidesSourceText(request)), name: "figures from the brief" },
+      {
+        name: "rendering",
+        passed: false,
+        findings: [
+          `Not rendered on this computer (${reason}). The slides are shown from their content; images and the PDF need Google Chrome, Chromium, Edge or Brave.`,
+        ],
+        attempt: 0,
+      },
+    ],
+    summary: `${deck.slides.length} slides · ${deck.title} (not rendered)`,
   };
 }

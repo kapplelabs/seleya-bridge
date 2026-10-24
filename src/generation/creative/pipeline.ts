@@ -103,7 +103,7 @@ function placeVisual(folder: string, file: string | undefined): boolean {
  */
 export async function runCreativePipeline(
   context: PipelineContext,
-): Promise<{ attachPicture?: () => Promise<boolean> }> {
+): Promise<{ attachPicture?: () => Promise<{ placed: boolean; reason?: string }> }> {
   mkdirSync(path.join(context.folder, "out"), { recursive: true });
   if (typeof context.request.edit_instruction === "string") {
     await runEdit(context);
@@ -113,16 +113,16 @@ export async function runCreativePipeline(
   const out = (name: string) => path.join(folder, "out", name);
 
   const endDesign = context.step("Designing");
-  let picture: Promise<string | undefined> | undefined;
+  let picture: Promise<{ file?: string; reason?: string }> | undefined;
   const startPicture = (prompt: string) => {
     if (picture || !prompt.trim()) return;
     const endPicture = context.step("Making the picture");
-    picture = context.makeImage(prompt, aspectOf(size)).then(({ file, reason }) => {
+    picture = context.makeImage(prompt, aspectOf(size)).then((made) => {
       endPicture(
-        file ? "done" : "failed",
-        file ? undefined : `No picture (${reason ?? "no agent made it"}): the design keeps its colours.`,
+        made.file ? "done" : "failed",
+        made.file ? undefined : `No picture (${made.reason ?? "no agent made it"}): the design keeps its colours.`,
       );
-      return file;
+      return made;
     });
   };
   const answer = answerJson(
@@ -159,10 +159,11 @@ export async function runCreativePipeline(
   if (!pending) return {};
   return {
     attachPicture: async () => {
-      if (!placeVisual(folder, await pending)) return false;
+      const made = await pending;
+      if (!placeVisual(folder, made.file)) return { placed: false, reason: made.reason ?? "no agent made it" };
       context.draft(`out/${VISUAL}`, "visual");
       writeFileSync(out("result.json"), JSON.stringify({ ...manifest, visual: `out/${VISUAL}` }));
-      return true;
+      return { placed: true };
     },
   };
 }

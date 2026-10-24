@@ -18,7 +18,7 @@ import {
 import { creativePostProcessor, expectedSize, quotedText } from "../../src/generation/creative/postprocess.ts";
 import { usecaseOf } from "../../src/generation/creative/usecases.ts";
 import type { ScriptAction } from "../../src/generation/harness/scripted.ts";
-import { ChromeRenderer, findChrome } from "../../src/generation/render/chrome.ts";
+import { ChromeRenderer, findChrome, RenderError } from "../../src/generation/render/chrome.ts";
 import { decodePng } from "../../src/generation/render/png.ts";
 import { recipeSkill, signedRecipe } from "./recipes.ts";
 import { advanceUntil, eventsOf, makeTestApp } from "./helpers.ts";
@@ -411,4 +411,82 @@ test("pipeline: the image prompt is read before the answer ends", () => {
   assert.equal(earlyImagePrompt('{"image_prompt": "A café \\"Mộc\\" at dawn", "brief'), 'A café "Mộc" at dawn');
   assert.equal(earlyImagePrompt('{"image_prompt": "A café at da'), undefined);
   assert.deepEqual(answerJson('```json\n{"kind":"text"}\n```'), { kind: "text" });
+});
+
+test("no browser can render: the design is delivered as a web page with its picture, not failed", async () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "unrendered-"));
+  try {
+    mkdirSync(path.join(folder, "out"));
+    writeFileSync(path.join(folder, "out", "visual.jpg"), "jpeg");
+    writeFileSync(
+      path.join(folder, "out", "poster.html"),
+      "<body style=\"background:#222 url('visual.jpg')\"><h1>Coffee Talk</h1><p>08:00</p></body>",
+    );
+    const broken = {
+      render: async () => {
+        throw new RenderError("No Chrome, Chromium, Edge or Brave was found");
+      },
+    } as unknown as ChromeRenderer;
+    const steps: string[] = [];
+    const result = await creativePostProcessor(broken, folder)({
+      run: { request: { prompt: 'Poster "Coffee Talk" at 08:00', width: 1000, height: 1500 } } as never,
+      folder,
+      manifest: { skill: "poster", pages: [{ name: "poster", html: "out/poster.html" }], visual: "out/visual.jpg" },
+      skill: recipeSkill("poster"),
+      skills: new Map([["poster", recipeSkill("poster")]]),
+      emit: () => undefined,
+      step: (label) => (steps.push(label), () => undefined),
+      runAgain: async () => ({ ok: true }),
+    });
+    const page = result.outputs.find((output) => output.kind === "html");
+    assert.equal(page?.path, "out/poster.preview.html");
+    const preview = readFileSync(path.join(folder, "out", "poster.preview.html"), "utf8");
+    assert.match(preview, /url\('data:image\/jpeg;base64,/, "the picture travels inside the page");
+    assert.ok(result.outputs.some((output) => output.slot === "visual"));
+    const byName = Object.fromEntries(result.checks.map((check) => [check.name, check.passed]));
+    assert.deepEqual(byName, { facts: true, "quoted text": true, rendering: false });
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: a picture that cannot be made is reported, not hidden", async () => {
+  const quotaOut: Harness = {
+    id: "painter",
+    name: "Painter",
+    check: async () => ({ installed: true, signedIn: true, canGenerateImages: true, capabilities: ["image"] }),
+    start: (input) => {
+      writeFileSync(path.join(input.folder, "out", "media", "visual.error.txt"), "Image quota exhausted (429)");
+      return { onActivity: () => undefined, exited: Promise.resolve({ ok: true }), stop: async () => undefined };
+    },
+  };
+  const t = makeTestApp({ mediaAgents: async () => [quotaOut] });
+  try {
+    const { digest } = t.app.recipes.accept(
+      signedRecipe("poster", (recipe) => {
+        recipe.files["poster/SPEC.md"] = "# Poster\n\nFollow `skills/CREATIVE-SPEC.md`.";
+        recipe.files["CREATIVE-SPEC.md"] = "Answer with one JSON object.";
+        recipe.files["poster/recipe.json"] = JSON.stringify({ ...JSON.parse(recipe.files["poster/recipe.json"]!), pipeline: "spec" });
+      }),
+    );
+    const answer = JSON.stringify({
+      image_prompt: "A monolith, no text",
+      brief: {},
+      concept: {},
+      pages: [{ name: "poster", html: "<body style='background:#111'><h1>Seleya</h1></body>" }],
+    });
+    const run = t.app.manager.create({
+      skill: "poster",
+      title: "No picture",
+      request: { recipe_digest: digest, prompt: "Seleya", width: 1000, height: 1500, script: [{ answer }] },
+    });
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus) && t.app.manager.get(run.id).phase === "completed");
+    const done = t.app.manager.get(run.id);
+    assert.equal(done.localStatus, "completed_with_issues");
+    const picture = done.checks.find((check) => check.name === "picture");
+    assert.equal(picture?.passed, false);
+    assert.match(picture?.findings[0] ?? "", /No picture was made \(Image quota exhausted \(429\)\)/);
+  } finally {
+    await t.cleanup();
+  }
 });
