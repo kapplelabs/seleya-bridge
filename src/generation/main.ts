@@ -10,7 +10,7 @@ import path from "node:path";
 import { createApp, fixedHarness, type LocalApp } from "./app.ts";
 import { realClock } from "./clock.ts";
 import { loadLocalConfig } from "./config.ts";
-import { creativePostProcessor } from "./creative/postprocess.ts";
+import { creativePostProcessor, pageDraftRenderer } from "./creative/postprocess.ts";
 import { BUILTIN_CLI_HARNESSES } from "./harness/builtins.ts";
 import { loadDescriptors } from "./harness/descriptor.ts";
 import { FabricHarness } from "./harness/fabric.ts";
@@ -83,7 +83,15 @@ export async function startGeneration(options: GenerationOptions): Promise<Gener
     trustedRecipeKeys: options.trustedRecipeKeys,
     renderer: () => renderer,
     postProcessors: new Map([["*", routed]]),
-    draftRenderers: new Map([["*", slideDraftRenderer(renderer)]]),
+    draftRenderers: new Map([
+      [
+        "*",
+        // A slide's JSON or a design page: whichever this draft is.
+        async (draft, folder, run) =>
+          (await slideDraftRenderer(renderer)(draft, folder, run)) ??
+          (await pageDraftRenderer(renderer)(draft, folder, run)),
+      ],
+    ]),
     pickHarness: scripted ? fixedHarness(scripted) : undefined,
     registry: (store, clock) => {
       const descriptors = loadDescriptors(path.join(config.home, "harnesses"));

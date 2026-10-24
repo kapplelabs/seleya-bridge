@@ -10,6 +10,15 @@ const firstLine = (text: string) => text.trim().split("\n")[0]?.trim() || undefi
 /** `agy models` id used unless SELEYA_ANTIGRAVITY_MODEL names another. */
 export const ANTIGRAVITY_DEFAULT_MODEL = "gemini-3.8-flash-medium";
 
+/**
+ * Antigravity's thinking level is part of the model id (`agy models`: …-low, …-medium, …-high), so an
+ * effort picks the id with that suffix.
+ */
+export function antigravityModel(effort?: "low" | "medium" | "high"): string {
+  const model = process.env.SELEYA_ANTIGRAVITY_MODEL || ANTIGRAVITY_DEFAULT_MODEL;
+  return effort ? model.replace(/-(low|medium|high)$/, `-${effort}`) : model;
+}
+
 export const antigravity = new CliHarness({
   id: "antigravity",
   name: "Antigravity",
@@ -18,17 +27,18 @@ export const antigravity = new CliHarness({
   stream: "antigravity",
   capabilities: DECLARED.antigravity ?? [],
   signInCommand: "agy",
-  args: ({ prompt, folder, timeLimitS }) => [
+  canResume: true,
+  args: ({ prompt, folder, timeLimitS, resume, effort }) => [
     // Flags before --print: agy's Go flag parser would otherwise take them as the prompt.
     // Antigravity's quota is per model: a fast model by default, SELEYA_ANTIGRAVITY_MODEL to change it.
     "--model",
-    process.env.SELEYA_ANTIGRAVITY_MODEL || ANTIGRAVITY_DEFAULT_MODEL,
+    antigravityModel(effort),
     "--mode",
     "accept-edits",
     "--sandbox",
     "--output-format",
     "stream-json",
-    "--new-project",
+    ...(resume ? ["--conversation", resume] : ["--new-project"]),
     "--add-dir",
     folder,
     "--print-timeout",
@@ -58,9 +68,12 @@ export const claudeCode = new CliHarness({
   stream: "claude",
   capabilities: DECLARED.claude ?? [],
   signInCommand: "claude /login",
-  args: ({ prompt }) => [
+  canResume: true,
+  args: ({ prompt, resume, effort }) => [
     "-p",
     prompt,
+    ...(resume ? ["--resume", resume] : []),
+    ...(effort ? ["--effort", effort] : []),
     "--output-format",
     "stream-json",
     "--verbose",

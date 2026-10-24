@@ -7,17 +7,17 @@ Before a step starts, and right after it ends:
     printf '%s\n' '{"type":"step","label":"<step name>","status":"active"}' >> progress.jsonl
     printf '%s\n' '{"type":"step","label":"<step name>","status":"done","detail":"<one short factual line>"}' >> progress.jsonl
 
+When one step ends and the next starts, write both lines with **one** command (each command costs time):
+
+    printf '%s\n' '{"type":"step","label":"<step>","status":"done","detail":"<…>"}' '{"type":"step","label":"<next step>","status":"active"}' >> progress.jsonl
+
 Use `"status":"failed"` with a detail if a step fails. Use exactly the step names your skill lists.
 
 When you add steps while working (for example one per slide), first declare the full list:
 
     printf '%s\n' '{"type":"plan","steps":["Outlining","Slide 1/5","Slide 2/5"]}' >> progress.jsonl
 
-When an intermediate file is ready to show (a background image, a slide), announce it:
-
-    printf '%s\n' '{"type":"draft","path":"out/bg.png","slot":"background"}' >> progress.jsonl
-
-Write `out/result.json` **last**, only after your own self-check. Seleya treats its appearance as "the agent is done".
+Seleya shows every file you write in `out/` as soon as it is written (a brief, a picture, a page, a slide): you never announce files yourself.
 
 Rules for every skill:
 

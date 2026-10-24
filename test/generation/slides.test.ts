@@ -8,6 +8,9 @@ import { ChromeRenderer, findChrome } from "../../src/generation/render/chrome.t
 import { decodePng } from "../../src/generation/render/png.ts";
 import { readDeck } from "../../src/generation/slides/deck.ts";
 import { expectedCount, renderDeck } from "../../src/generation/slides/postprocess.ts";
+import { completeItems } from "../../src/generation/slides/pipeline.ts";
+import { advanceUntil, makeTestApp } from "./helpers.ts";
+import { signedRecipe } from "./recipes.ts";
 
 const home = mkdtempSync(path.join(tmpdir(), "slides-"));
 const renderer = new ChromeRenderer(home);
@@ -252,3 +255,50 @@ test(
     );
   },
 );
+
+test("slides pipeline: each slide is read as soon as it is complete in the answer", () => {
+  const partial = '{"title":"Hạt Mộc","theme":"ember","slides":[{"layout":"cover","heading":"A {b}"},{"layout":"cards","cards":[{"title":"x"}]},{"layout":"bul';
+  const items = completeItems(partial, "slides");
+  assert.equal(items.length, 2);
+  assert.deepEqual(JSON.parse(items[0]!), { layout: "cover", heading: "A {b}" });
+});
+
+test("slides pipeline: one answer makes the deck, its slides and the picture jobs", async () => {
+  const t = makeTestApp();
+  try {
+    const recipe = signedRecipe("slides", (value) => {
+      value.files["slides/SPEC.md"] = "# Slides in one answer";
+      value.files["slides/recipe.json"] = JSON.stringify({
+        ...JSON.parse(value.files["slides/recipe.json"]!),
+        pipeline: "spec",
+      });
+    });
+    const { digest } = t.app.recipes.accept(recipe);
+    const answer = JSON.stringify({
+      title: "Hạt Mộc",
+      theme: "ember",
+      slides: [
+        { layout: "cover", heading: "Hạt Mộc", image: { id: "slide-01", prompt: "a café, no text" } },
+        { layout: "cards", heading: "Why", cards: [{ title: "Beans", body: "From Cầu Đất" }] },
+      ],
+    });
+    const run = t.app.manager.create({
+      skill: "slides",
+      title: "Deck",
+      request: { recipe_digest: digest, brief: "Hạt Mộc", count: 2, script: [{ answer }] },
+    });
+    assert.deepEqual(
+      t.app.manager.get(run.id).plannedSteps.map((step) => step.label),
+      ["Writing the slides", "Rendering", "Checking the slides"],
+    );
+    await advanceUntil(t.clock, () => !["queued", "running"].includes(t.app.manager.get(run.id).localStatus));
+    const out = path.join(t.config.runsDir, run.id, "out");
+    const deck = JSON.parse(readFileSync(path.join(out, "deck.json"), "utf8"));
+    assert.equal(deck.slides.length, 2);
+    assert.ok(existsSync(path.join(out, "slides", "02.json")));
+    const jobs = JSON.parse(readFileSync(path.join(out, "media", "jobs.json"), "utf8"));
+    assert.deepEqual(jobs.map((job: { id: string; aspect: string }) => [job.id, job.aspect]), [["slide-01", "16:9"]]);
+  } finally {
+    await t.cleanup();
+  }
+});

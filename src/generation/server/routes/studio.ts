@@ -74,6 +74,8 @@ export function generationJson(generation: GenerationRow, runs: RunRow[]) {
           })),
         checks: run.checks,
         has_issues: run.localStatus === "completed_with_issues",
+        // Ready on its colours; the picture is still being made (the page refreshes when it lands).
+        picture_pending: run.phase === "picture",
       },
     ];
   });

@@ -251,3 +251,21 @@ test("spec 009: a tampered recipe sent through the bridge starts nothing", async
     await t.cleanup();
   }
 });
+
+test("a run's folder holds only what its skill reads, and no agent log", async () => {
+  const t = makeTestApp();
+  try {
+    const { digest } = t.app.recipes.accept(signedRecipe("poster"));
+    const run = t.app.manager.create({
+      skill: "poster",
+      title: "Lean",
+      request: { recipe_digest: digest, script: [{ exit: "ok" }] },
+    });
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus));
+    const skills = path.join(t.config.runsDir, run.id, "skills");
+    assert.deepEqual(readdirSync(skills).sort(), ["CREATIVE.md", "PROGRESS.md", "_media", "poster"]);
+    assert.equal(existsSync(path.join(t.config.runsDir, run.id, "harness.log")), false);
+  } finally {
+    await t.cleanup();
+  }
+});

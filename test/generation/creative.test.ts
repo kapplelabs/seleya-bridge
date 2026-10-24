@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 
+import { editContext, PREVIOUS_RESULT, saveLayout, textsInRegion } from "../../src/generation/creative/edit.ts";
+import { plannedFor } from "../../src/generation/runs/manager.ts";
+import { answerJson, earlyImagePrompt } from "../../src/generation/creative/pipeline.ts";
+import type { Harness } from "../../src/generation/harness/types.ts";
 import {
   checkContrast,
   checkFacts,
@@ -11,13 +15,15 @@ import {
   checkLayout,
   checkQuotes,
 } from "../../src/generation/creative/checks.ts";
-import { creativePostProcessor, expectedSize } from "../../src/generation/creative/postprocess.ts";
+import { creativePostProcessor, expectedSize, quotedText } from "../../src/generation/creative/postprocess.ts";
 import { usecaseOf } from "../../src/generation/creative/usecases.ts";
 import type { ScriptAction } from "../../src/generation/harness/scripted.ts";
 import { ChromeRenderer, findChrome } from "../../src/generation/render/chrome.ts";
 import { decodePng } from "../../src/generation/render/png.ts";
 import { recipeSkill, signedRecipe } from "./recipes.ts";
-import { advanceUntil, makeTestApp } from "./helpers.ts";
+import { advanceUntil, eventsOf, makeTestApp } from "./helpers.ts";
+
+const finished = (status: string) => !["queued", "running"].includes(status);
 
 const home = mkdtempSync(path.join(tmpdir(), "creative-"));
 const renderer = new ChromeRenderer(home);
@@ -265,4 +271,144 @@ test('menu items written as "Name — price" pass when laid out as name and pric
   assert.equal(missingPrice.passed, false, "a missing price is still a missing item");
   const twice = checkInventory("Cà phê sữa 35.000đ\nCà phê sữa 35.000đ\nBạc xỉu 39.000đ", items);
   assert.equal(twice.passed, false, "an item printed twice is caught");
+});
+
+test("an edit is told the page, its direction and the texts in the marked area, and plans one step", () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "edit-"));
+  try {
+    mkdirSync(path.join(folder, "out"));
+    writeFileSync(path.join(folder, "out", "poster.html"), "<body><p>by Vulcan Labs</p></body>");
+    writeFileSync(path.join(folder, "out", "concept.json"), '{"title":"Dusk"}');
+    writeFileSync(path.join(folder, PREVIOUS_RESULT), '{"skill":"poster"}');
+    const page = {
+      name: "poster",
+      html: "out/poster.html",
+      width: 1000,
+      height: 1500,
+      boxes: [
+        { text: "Big headline", x: 100, y: 100, width: 800, height: 200 },
+        { text: "by Vulcan Labs", x: 350, y: 1410, width: 300, height: 40 },
+      ],
+    };
+    saveLayout(folder, { pages: [page] });
+    const region = { x: 0.3, y: 0.93, width: 0.4, height: 0.04 };
+    assert.deepEqual(textsInRegion(page, region), ["by Vulcan Labs"]);
+    const context = editContext(folder, { edit_instruction: "Make it by KappleLabs", edit_region: region }) ?? "";
+    assert.match(context, /The marked area holds these texts: "by Vulcan Labs"/);
+    assert.match(context, /<p>by Vulcan Labs<\/p>/);
+    assert.match(context, /"title":"Dusk"/);
+    assert.match(context, /"skill":"poster"/);
+    assert.equal(editContext(folder, { prompt: "new" }), undefined, "not an edit");
+    const poster = ["Writing the brief", "Choosing a direction", "Laying out the design", "Rendering", "Checking the design"];
+    assert.deepEqual(plannedFor(poster, { edit_instruction: "x" }), ["Applying the edit", "Rendering", "Checking the design"]);
+    assert.deepEqual(plannedFor(poster, { resize_from: "1000×1500" })[0], "Re-laying out for the new size");
+    assert.deepEqual(plannedFor(poster, {}), poster);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("an edit's quoted text replaces the first request's: the replaced headline is not required", () => {
+  const request = {
+    prompt: 'Poster for "Hạt Mộc Coffee Talk" at 08:00',
+    edit_instruction: 'Đổi tiêu đề thành "Sáng Thứ Bảy Cùng Cà Phê"',
+  };
+  const design = "Sáng Thứ Bảy Cùng Cà Phê 08:00";
+  assert.equal(checkQuotes(design, quotedText(request)).passed, true);
+  assert.equal(checkQuotes("Hạt Mộc Coffee Talk 08:00", quotedText(request)).passed, false);
+  assert.equal(checkQuotes(design, quotedText({ prompt: request.prompt })).passed, false);
+});
+
+test("pipeline: one answer makes the design while the picture is made, then an edit is one answer", async () => {
+  // A picture agent that delivers the job it is given.
+  const painter: Harness = {
+    id: "painter",
+    name: "Painter",
+    check: async () => ({ installed: true, signedIn: true, canGenerateImages: true, capabilities: ["image"] }),
+    start: (input) => {
+      const jobs = JSON.parse(readFileSync(path.join(input.folder, "out", "media", "jobs-image.json"), "utf8")) as {
+        save_as: string;
+      }[];
+      for (const job of jobs) writeFileSync(path.join(input.folder, job.save_as), "picture");
+      return { onActivity: () => undefined, exited: Promise.resolve({ ok: true }), stop: async () => undefined };
+    },
+  };
+  const t = makeTestApp({ mediaAgents: async () => [painter] });
+  try {
+    const spec = signedRecipe("poster", (recipe) => {
+      recipe.files["poster/SPEC.md"] = "# Poster\n\nFollow `skills/CREATIVE-SPEC.md`.";
+      recipe.files["CREATIVE-SPEC.md"] = "Answer with one JSON object.";
+      recipe.files["poster/recipe.json"] = JSON.stringify({
+        ...JSON.parse(recipe.files["poster/recipe.json"]!),
+        pipeline: "spec",
+      });
+    });
+    const { digest } = t.app.recipes.accept(spec);
+    const answer = JSON.stringify({
+      image_prompt: "A warm café at dawn, no text",
+      brief: { headline: "Coffee Talk" },
+      concept: { title: "Dawn" },
+      pages: [{ name: "poster", html: "<body style=\"background:#333 url('visual.jpg')\"><h1>Coffee Talk</h1></body>" }],
+      keep_together: ["Coffee Talk"],
+    });
+    const run = t.app.manager.create({
+      skill: "poster",
+      title: "Pipeline",
+      request: { recipe_digest: digest, prompt: "Coffee Talk", width: 1000, height: 1500, script: [{ answer }] },
+    });
+    assert.deepEqual(
+      t.app.manager.get(run.id).plannedSteps.map((step) => step.label),
+      ["Designing", "Making the picture", "Rendering", "Checking the design"],
+    );
+    // Ready on its colours first (phase "picture"), then the picture is added and checked again.
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus));
+    const phases = () =>
+      eventsOf(t.app, run.id)
+        .filter((event) => event.type === "seleya.run.phase")
+        .map((event) => (event.data as { phase: string }).phase);
+    await advanceUntil(t.clock, () => t.app.manager.get(run.id).phase === "completed");
+    assert.ok(phases().indexOf("picture") < phases().lastIndexOf("completed"), phases().join(","));
+    const done = t.app.manager.get(run.id);
+    assert.equal(done.localStatus, "completed", JSON.stringify(done.error));
+    assert.equal(
+      eventsOf(t.app, run.id).filter((event) => event.type === "seleya.output.final").length,
+      2,
+      "published without, then with the picture",
+    );
+    const out = path.join(t.config.runsDir, run.id, "out");
+    assert.match(readFileSync(path.join(out, "poster.html"), "utf8"), /Coffee Talk/);
+    assert.equal(readFileSync(path.join(out, "visual.jpg"), "utf8"), "picture");
+    const manifest = JSON.parse(readFileSync(path.join(out, "result.json"), "utf8"));
+    assert.equal(manifest.visual, "out/visual.jpg");
+    assert.equal(manifest.pages[0].html, "out/poster.html");
+
+    // An edit: one answer with replaced words; markup is never touched.
+    const edit = t.app.manager.create(
+      {
+        skill: "poster",
+        title: "Edit",
+        request: {
+          ...done.request,
+          edit_instruction: 'Change the headline to "Tea Talk"',
+          script: [{ answer: JSON.stringify({ kind: "text", replacements: [{ from: "Coffee Talk", to: "Tea Talk" }] }) }],
+        },
+      },
+      undefined,
+      done,
+    );
+    assert.deepEqual(edit.plannedSteps.map((step) => step.label)[0], "Applying the edit");
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(edit.id).localStatus));
+    assert.equal(t.app.manager.get(edit.id).localStatus, "completed", JSON.stringify(t.app.manager.get(edit.id).error));
+    const edited = readFileSync(path.join(t.config.runsDir, edit.id, "out", "poster.html"), "utf8");
+    assert.match(edited, /<h1>Tea Talk<\/h1>/);
+    assert.match(edited, /url\('visual.jpg'\)/);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("pipeline: the image prompt is read before the answer ends", () => {
+  assert.equal(earlyImagePrompt('{"image_prompt": "A café \\"Mộc\\" at dawn", "brief'), 'A café "Mộc" at dawn');
+  assert.equal(earlyImagePrompt('{"image_prompt": "A café at da'), undefined);
+  assert.deepEqual(answerJson('```json\n{"kind":"text"}\n```'), { kind: "text" });
 });

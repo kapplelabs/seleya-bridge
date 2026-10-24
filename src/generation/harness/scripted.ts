@@ -22,6 +22,8 @@ export type ScriptAction =
   | { manifest: Record<string, unknown> }
   | { activity: HarnessActivity }
   | { exit: "ok" | "fail"; code?: string; message?: string }
+  /** Says this text (as the agent's words) and ends with it as the answer (the pipeline's JSON). */
+  | { answer: string }
   /** Do nothing this tick (a pause in the agent's work). */
   | { idle: true }
   /** Never act again until stopped (a hung agent). */
@@ -150,7 +152,10 @@ export class ScriptedHandle implements HarnessHandle {
     else if ("manifest" in action)
       writeFileSync(this.file("out/result.json"), JSON.stringify(action.manifest));
     else if ("activity" in action) for (const listener of this.listeners) listener(action.activity);
-    else if ("exit" in action)
+    else if ("answer" in action) {
+      for (const listener of this.listeners) listener({ kind: "text", text: action.answer });
+      this.finish({ ok: true, text: action.answer });
+    } else if ("exit" in action)
       this.finish({ ok: action.exit === "ok", code: action.code, message: action.message });
   }
 }

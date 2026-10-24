@@ -21,7 +21,7 @@ test("every run folder gets an index of the skills the orchestrator can pick", a
       (id) => t.app.recipes.accept(signedRecipe(id)).digest,
     );
     const run = t.app.manager.create({
-      skill: "_scripted",
+      skill: "orchestrator",
       title: "Index",
       request: { recipe_digests },
     });
@@ -111,7 +111,7 @@ test("a custom design can be saved as a skill, is routable, and can be deleted",
     assert.doesNotMatch(markdown, /Minh Anh/, "content comes from new requests, not the saved run");
     assert.equal(parseFrontMatter(markdown).saved_from, run.id);
     // Routable: new runs copy it into their skills folder and list it in the index.
-    const next = t.app.manager.create({ skill: "_scripted", title: "Next", request: {} });
+    const next = t.app.manager.create({ skill: "orchestrator", title: "Next", request: {} });
     await advanceUntil(t.clock, () => finished(t.app.manager.get(next.id).localStatus));
     assert.match(
       readFileSync(path.join(t.config.runsDir, next.id, "skills", "INDEX.md"), "utf8"),

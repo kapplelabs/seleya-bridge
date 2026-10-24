@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { cpSync, existsSync, rmSync } from "node:fs";
+import { cpSync, existsSync, renameSync } from "node:fs";
 import path from "node:path";
 
 import type { Clock } from "../clock.ts";
@@ -65,6 +65,30 @@ type Listener = (event: StoredEvent) => void;
  * Owns every run: creates them, queues them under the concurrency limit, starts their runners,
  * records their events and fans them out to stream subscribers.
  */
+/**
+ * An edit or resize of a Studio design reports one step of its own before Seleya renders and checks
+ * it (skills/CREATIVE.md), not the whole creation pipeline.
+ */
+export function plannedFor(
+  steps: string[],
+  request: Record<string, unknown>,
+  settings?: Record<string, unknown>,
+): string[] {
+  const own =
+    typeof request.edit_instruction === "string"
+      ? "Applying the edit"
+      : request.resize_from
+        ? "Re-laying out for the new size"
+        : undefined;
+  // The creative pipeline (creative/pipeline.ts): one answer, the picture alongside.
+  if (!own && settings?.pipeline === "spec")
+    return settings.result === "deck"
+      ? ["Writing the slides", "Rendering", "Checking the slides"]
+      : ["Designing", "Making the picture", "Rendering", "Checking the design"];
+  if (!own || !steps.includes("Rendering")) return steps;
+  return [own, ...steps.filter((step) => step === "Rendering" || step.startsWith("Checking"))];
+}
+
 export class RunManager {
   private queue: string[] = [];
   private active = new Map<string, RunRunner>();
@@ -120,7 +144,7 @@ export class RunManager {
    */
   create(input: CreateRunInput, retry?: RunRow, from?: RunRow): RunRow {
     const skill = this.skill(input.skill ?? "orchestrator", input.request);
-    const { planned, steps } = applyPlan(skill.plannedSteps, []);
+    const { planned, steps } = applyPlan(plannedFor(skill.plannedSteps, input.request, skill.settings), []);
     const run: RunRow = {
       id: this.newId(),
       title: input.title.trim() || skill.title,
@@ -150,8 +174,9 @@ export class RunManager {
       const sourceOut = path.join(this.deps.config.runsDir, source.id, "out");
       const out = path.join(this.deps.config.runsDir, run.id, "out");
       if (existsSync(sourceOut)) cpSync(sourceOut, out, { recursive: true });
-      // The source's manifest would end the new run before the agent starts.
-      rmSync(path.join(out, "result.json"), { force: true });
+      // The source's manifest would end the new run before the agent starts; an edit reads it aside.
+      if (existsSync(path.join(out, "result.json")))
+        renameSync(path.join(out, "result.json"), path.join(out, ".previous-result.json"));
     }
     this.emit(run.id, "seleya.run.started", { run_id: run.id, agent_id: "", title: run.title });
     this.emit(run.id, "seleya.run.plan", { steps: planned });
@@ -367,6 +392,9 @@ export class RunManager {
       this.emit(run.id, "seleya.error", { code: "interrupted", message, retryable: true });
       this.emit(run.id, "stream.done", {});
     }
+    // A run that stopped while adding its pictures keeps the result it had.
+    for (const run of this.deps.store.listRuns({ status: ["completed", "completed_with_issues"], limit: 1000 }))
+      if (run.phase === "picture") this.deps.store.updateRun(run.id, { phase: "completed" });
     return stale.length;
   }
 
