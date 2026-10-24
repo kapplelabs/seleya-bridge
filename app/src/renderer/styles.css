@@ -1,0 +1,172 @@
+/*
+ * Seleya's tokens (seleya/src/styles/seleya.css), so the app reads as part of Seleya. Light and dark follow
+ * macOS. Design rules: seleya/design-system/seleya/pages/bridge-launcher.md.
+ */
+@import "tailwindcss";
+@import "@fontsource-variable/plus-jakarta-sans";
+
+:root {
+  --background: #f3f4f7;
+  --foreground: #16172b;
+  --card: #ffffff;
+  --primary: #6d4fe8;
+  --primary-foreground: #ffffff;
+  --muted: #eeeff4;
+  --muted-foreground: #5b6072;
+  --destructive: #dc2626;
+  --border: #e4e6ec;
+  --input: #dcdfe6;
+  --ring: #6d4fe8;
+  --success: #0b8a5f;
+  --warning: #b45309;
+  --brand-soft: #efebfe;
+  --aurora-1: #8b5cf6;
+  --aurora-2: #ec4899;
+  --aurora-3: #38bdf8;
+  --elev-soft: 0 1px 2px rgb(22 23 43 / 0.04), 0 6px 20px -8px rgb(22 23 43 / 0.08);
+  --elev-float: 0 2px 6px rgb(22 23 43 / 0.05), 0 16px 40px -12px rgb(22 23 43 / 0.16);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0e0f13;
+    --foreground: #ecedf3;
+    --card: #16171d;
+    --primary: #9a86ff;
+    --primary-foreground: #14102e;
+    --muted: #20212a;
+    --muted-foreground: #9a9dad;
+    --destructive: #f26464;
+    --border: #262833;
+    --input: #2d2f3b;
+    --ring: #9a86ff;
+    --success: #34c38f;
+    --warning: #f0b13d;
+    --brand-soft: #231e45;
+    --elev-soft: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 20px -8px rgb(0 0 0 / 0.4);
+    --elev-float: 0 2px 6px rgb(0 0 0 / 0.35), 0 16px 40px -12px rgb(0 0 0 / 0.6);
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-brand-soft: var(--brand-soft);
+  --shadow-soft: var(--elev-soft);
+  --shadow-float: var(--elev-float);
+}
+
+/* Seleya's type scale, one step below Tailwind's defaults. */
+@theme {
+  --text-sm: 0.8125rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.125rem;
+  --text-2xl: 1.375rem;
+  --text-3xl: 1.625rem;
+
+  --animate-orb-breathe: orb-breathe 4s ease-in-out infinite;
+  --animate-fade-up: fade-up 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-shimmer: shimmer 2.2s linear infinite;
+
+  @keyframes orb-breathe {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(1.08);
+    }
+  }
+  @keyframes fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+}
+
+@utility bg-aurora-soft {
+  background-image:
+    radial-gradient(60% 80% at 0% 0%, color-mix(in srgb, var(--aurora-1) 14%, transparent), transparent),
+    radial-gradient(50% 70% at 100% 0%, color-mix(in srgb, var(--aurora-3) 12%, transparent), transparent),
+    radial-gradient(60% 60% at 70% 100%, color-mix(in srgb, var(--aurora-2) 8%, transparent), transparent);
+}
+
+@utility skeleton {
+  background-image: linear-gradient(90deg, var(--muted) 0%, var(--border) 50%, var(--muted) 100%);
+  background-size: 200% 100%;
+  animation: var(--animate-shimmer);
+}
+
+/* The window has no title bar: this strip is where it is dragged from. */
+@utility drag-region {
+  -webkit-app-region: drag;
+}
+@utility no-drag {
+  -webkit-app-region: no-drag;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  html {
+    @apply font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+  body {
+    @apply bg-background text-foreground select-none;
+  }
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  label:has(input:not(:disabled)) {
+    cursor: pointer;
+  }
+  input,
+  textarea,
+  pre {
+    @apply select-text;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

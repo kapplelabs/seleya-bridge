@@ -32,6 +32,41 @@ seleya-bridge revoke     # forget every paired browser
 seleya-bridge config     # print the config file path
 ```
 
+## Seleya Bridge app (macOS)
+
+For people who don't use a terminal, `app/` is a menu-bar app that runs the same bridge:
+
+- **Install**: open `Seleya Bridge-<version>-arm64.dmg` and drag the app to Applications. It ships its own
+  `claude` binary; the user only needs to be signed in to Claude Code once (`claude`, then `/login`), as
+  for the CLI.
+- **Use**: the bridge starts with the app. A menu-bar glyph shows its state (faded: off, dot: Claude is
+  answering or a pairing code is waiting); its menu starts and stops it, opens Seleya's AI providers page (*Open Seleya Provider*, where the
+  browser is paired and the connection set up) and turns on
+  *Start at Login*. The control panel shows the status, the pairing code (also sent as a notification, and
+  the panel floats over the browser until the code is used), paired browsers, connectors and a log.
+  *Settings* edits `allowedOrigins`, `workspace`, `tools`, `connectors` and `model` in the same
+  `config.json` and restarts the bridge.
+- **From Seleya**: the app registers `seleya-bridge://`. When the bridge is offline, Seleya's *Open Seleya
+  Bridge* button opens `seleya-bridge://open`, which launches or shows the app (launching it starts the
+  bridge). Any website can open such a link, so it never changes settings, pairs a browser or starts a
+  bridge you stopped. Set `BRIDGE_DOWNLOAD_URL` in Seleya's `.env` to show a
+  download link too.
+
+The app and the CLI share `config.json`, `tokens.json` and the port, so run one at a time: the app says so
+when the port is taken.
+
+```bash
+cd app
+pnpm install
+pnpm dev        # panel from Vite with hot reload; restart after changing src/main or the bridge
+pnpm dist       # release/Seleya Bridge-<version>-<arch>.dmg for this Mac's architecture
+```
+
+`pnpm install` in the repo root comes first: the app bundles `../src`, zod and the Agent SDK from there.
+`pnpm dist` builds an unsigned app; for other Macs, sign and notarize it (`CSC_LINK`, `APPLE_ID`, … for
+electron-builder), or Gatekeeper refuses to open it. The panel's design follows
+`seleya/design-system/seleya/pages/bridge-launcher.md`.
+
 ## Configuration
 
 `~/.config/seleya-bridge/config.json` (or `$SELEYA_BRIDGE_HOME/config.json`), written with defaults on
@@ -40,7 +75,7 @@ first run:
 | Key | Default | |
 |---|---|---|
 | `port` | `47821` | Fixed so Seleya knows where to look |
-| `allowedOrigins` | `["http://localhost:3000"]` | Add your deployed Seleya origin, e.g. `https://seleya.example.com` (no trailing slash) |
+| `allowedOrigins` | `[]` | Your deployed Seleya origin, e.g. `https://seleya.example.com` (no trailing slash). `https` only, except `http://localhost:<port>` for a local Seleya: add that only while developing, since every page served on that port is trusted too |
 | `workspace` | `~/seleya-workspace` | Claude's working directory |
 | `tools` | `["Read", "Glob", "Grep"]` | Built-in tools Claude may use; others don't exist for it |
 | `model` | Claude Code's default | Model override |
@@ -160,11 +195,20 @@ Every page you open can send requests to `127.0.0.1`, and Claude Code can act on
   or `[::1]` on the bridge port are refused (DNS rebinding).
 - **Origin allowlist.** A browser request from an origin not in `allowedOrigins` gets `403` and no CORS
   headers. POST bodies must be `application/json`, which forces a CORS preflight.
-- **Pairing.** Seleya calls `POST /v1/pair/start`; the bridge prints a 6-digit code in its terminal (valid
-  2 minutes, 5 tries, single use); the user types it into Seleya, which trades it for a random token.
-  Only the token's SHA-256 is stored (`tokens.json`, mode 600), bound to the origin that paired it.
+- **Pairing.** Seleya calls `POST /v1/pair/start`; the bridge shows a 6-digit code in its terminal, or in
+  the app and a notification (valid 2 minutes, 5 tries, single use); the user types it into Seleya, which
+  trades it for a random token. After 10 wrong codes within an hour, whatever the code or origin, pairing
+  pauses for an hour (`429 pairing_locked`) or until the bridge restarts.
+- **Tokens.** Only the token's SHA-256 is stored (`tokens.json`, mode 600), bound to the origin that
+  paired it: a request without that `Origin` header isn't authorized. A token unused for 30 days stops
+  working.
+- **Ownership.** A run, its stream tickets and its result belong to the paired browser that started it;
+  others get `404`. A conversation (`session_id`) can only be continued by the browser that started it
+  (`sessions.json`), never a Claude Code session started some other way.
 - **Stream tickets.** `EventSource` can't send headers, so the SSE URL carries a ticket bound to one run,
-  valid 60 seconds (long enough for the browser's own reconnect).
+  valid 60 seconds and 5 connections (enough for the browser's own reconnects).
+- **Redacted answers.** Chat answers are redacted like connector content before they leave the bridge:
+  text is streamed a line at a time so no value is split, and the completed message is redacted whole.
 - **Isolated Claude.** No `~/.claude` settings, hooks, MCP servers or skills are loaded, so your personal
   permission rules never apply to web requests. Only `tools` and the read-only tools of `connectors`
   exist, permission mode is `default`, and any call that would need approval is denied (an approval flow
@@ -180,11 +224,11 @@ JSON is snake_case on the wire. Errors are `{ "error": { "code", "message" } }`.
 
 | Method & path | Auth | Body | Response |
 |---|---|---|---|
-| `GET /v1/health` | optional | | `{ name, version, paired, busy, connectors: [{ id, name, state }] }` (`paired` is whether the sent token is valid) |
-| `POST /v1/pair/start` | Origin | | `{ expires_at }`; `429` within 3 s of the last code |
+| `GET /v1/health` | optional | | `{ name, version, paired, busy, connectors: [{ id, name, state }] }` (`paired` is whether the sent token is valid for the sending origin) |
+| `POST /v1/pair/start` | Origin | | `{ expires_at }`; `429 too_many_requests` within 3 s of the last code, `429 pairing_locked` after too many wrong codes |
 | `POST /v1/pair/confirm` | Origin | `{ code }` | `{ token }`; `401 invalid_code` |
 | `DELETE /v1/pair` | Bearer | | `204`, revokes the caller's token |
-| `POST /v1/runs` | Bearer | `{ prompt, session_id?, title? }` | `201 { run_id, session_id, assistant_message_id, stream }`; `409 busy` |
+| `POST /v1/runs` | Bearer | `{ prompt, session_id?, title? }` | `201 { run_id, session_id, assistant_message_id, stream }`; `404 conversation_not_found`, `409 busy` |
 | `POST /v1/briefings` | Bearer | | `201 { run_id, stream }`: today's Daily Briefing as an agent run; `409 busy`, `409 no_connectors` |
 | `POST /v1/calendar/weeks` | Bearer | `{ week_start }` | `201 { run_id, stream }`: one Mon–Fri week of Google Calendar; `400 invalid_week`, `409 busy`, `409 no_calendar` |
 | `POST /v1/mail/triage` | Bearer | `{ days? }` | `201 { run_id, stream }`: the last 1–7 days of Gmail, triaged; `409 busy`, `409 no_gmail` |

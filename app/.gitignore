@@ -1,0 +1,6 @@
+node_modules
+dist
+release
+# Drawn by scripts/render-icons.mjs on every build.
+assets/*.png
+build

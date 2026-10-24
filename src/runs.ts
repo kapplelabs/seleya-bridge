@@ -25,6 +25,8 @@ export class Run {
   readonly abort = new AbortController();
   /** The Claude Code session this run belongs to: Seleya's conversation id. */
   readonly sessionId: string;
+  /** The paired browser (token record id) that started the run: the only one that may read or stop it. */
+  readonly ownerId: string;
   readonly events: RunEvent[] = [];
   /**
    * What a report run produced (a briefing, a calendar week), served by GET /v1/runs/:id/result as
@@ -34,8 +36,9 @@ export class Run {
   private readonly listeners = new Set<Listener>();
   private onFinish: (() => void) | undefined;
 
-  constructor(sessionId: string, onFinish: () => void) {
+  constructor(sessionId: string, ownerId: string, onFinish: () => void) {
     this.sessionId = sessionId;
+    this.ownerId = ownerId;
     this.onFinish = onFinish;
   }
 
@@ -68,19 +71,28 @@ export class Run {
 export class RunRegistry {
   private readonly runs = new Map<string, Run>();
   private active: Run | undefined;
+  private readonly onBusyChange: ((busy: boolean) => void) | undefined;
+
+  constructor(onBusyChange?: (busy: boolean) => void) {
+    this.onBusyChange = onBusyChange;
+  }
 
   /** One run at a time: Claude Code works on this machine, and a second caller shouldn't pile on. */
   get busy(): boolean {
     return this.active !== undefined;
   }
 
-  create(sessionId: string): Run {
-    const run = new Run(sessionId, () => {
-      if (this.active === run) this.active = undefined;
+  create(sessionId: string, ownerId: string): Run {
+    const run = new Run(sessionId, ownerId, () => {
+      if (this.active === run) {
+        this.active = undefined;
+        this.onBusyChange?.(false);
+      }
       setTimeout(() => this.runs.delete(run.id), RETENTION_MS).unref();
     });
     this.runs.set(run.id, run);
     this.active = run;
+    this.onBusyChange?.(true);
     return run;
   }
 

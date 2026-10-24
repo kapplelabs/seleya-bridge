@@ -1,7 +1,7 @@
 /**
  * HTTP API (all JSON is snake_case on the wire):
  *   GET    /v1/health                    → { name, version, paired, busy, connectors }
- *   POST   /v1/pair/start                → { expires_at }       prints a code in the terminal
+ *   POST   /v1/pair/start                → { expires_at }       shows a code in the terminal or app
  *   POST   /v1/pair/confirm  { code }    → { token }
  *   DELETE /v1/pair                      → 204                  revokes the caller's token
  *   POST   /v1/runs  { prompt, session_id?, title? }  → { run_id, session_id, assistant_message_id, stream }
@@ -27,6 +27,7 @@ import { HttpError, readJson, sendEmpty, sendError, sendJson } from "./http.ts";
 import { canReadMail, DEFAULT_DAYS, MAX_DAYS, MIN_DAYS, runMailTriage } from "./mail.ts";
 import type { Pairing, TokenStore } from "./pairing.ts";
 import { RunRegistry, type Run } from "./runs.ts";
+import type { SessionStore } from "./sessions.ts";
 import {
   bearerToken,
   isAllowedHost,
@@ -57,8 +58,12 @@ export interface BridgeDeps {
   version: string;
   tokens: TokenStore;
   pairing: Pairing;
+  /** Which paired browser started each chat conversation. */
+  sessions: SessionStore;
   /** The connectors runs may read from; empty until discovery finishes. */
   connectors: () => ConnectorSet;
+  /** Claude started or finished answering a request. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 const titleFrom = (prompt: string) => {
@@ -66,11 +71,19 @@ const titleFrom = (prompt: string) => {
   return line.length > TITLE_LENGTH ? `${line.slice(0, TITLE_LENGTH - 1)}…` : line || "New chat";
 };
 
-export function createBridgeServer({ config, version, tokens, pairing, connectors }: BridgeDeps): {
+export function createBridgeServer({
+  config,
+  version,
+  tokens,
+  pairing,
+  sessions,
+  connectors,
+  onBusyChange,
+}: BridgeDeps): {
   server: Server;
   runs: RunRegistry;
 } {
-  const runs = new RunRegistry();
+  const runs = new RunRegistry(onBusyChange);
   const tickets = new TicketStore();
   const publicOrigin = `http://127.0.0.1:${config.port}`;
 
@@ -92,9 +105,11 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
     return record;
   };
 
-  const runOr404 = (id: string) => {
+  /** The run, if the caller started it: another paired browser's runs look like they don't exist. */
+  const runOr404 = (id: string, ownerId: string) => {
     const run = runs.get(id);
-    if (!run) throw new HttpError(404, "run_not_found", "No such run (finished runs are kept 10 minutes)");
+    if (!run || run.ownerId !== ownerId)
+      throw new HttpError(404, "run_not_found", "No such run (finished runs are kept 10 minutes)");
     return run;
   };
 
@@ -115,13 +130,20 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
         version,
         paired: token !== undefined && tokens.find(token, origin) !== undefined,
         busy: runs.busy,
-        // Which connectors Claude can read from; tools and errors stay in the bridge's terminal.
+        // Which connectors Claude can read from; tools and errors stay in the bridge's terminal or app.
         connectors: connectors().connectors.map(({ id, name, state }) => ({ id, name, state })),
       });
     }
 
     if (method === "POST" && url.pathname === "/v1/pair/start") {
-      const expiresAt = pairing.start(requireOrigin(origin));
+      const pairingOrigin = requireOrigin(origin);
+      if (pairing.locked())
+        throw new HttpError(
+          429,
+          "pairing_locked",
+          "Too many wrong codes. Pairing is paused for a while; restart the bridge to allow it again.",
+        );
+      const expiresAt = pairing.start(pairingOrigin);
       if (!expiresAt) throw new HttpError(429, "too_many_requests", "Wait a few seconds before asking again");
       return sendJson(res, 200, { expiresAt: expiresAt.toISOString() });
     }
@@ -135,14 +157,18 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
 
     if (method === "DELETE" && url.pathname === "/v1/pair") {
       tokens.revoke(authorize(req, origin).id);
+      sessions.keepOwners(tokens.list().map((record) => record.id));
       return sendEmpty(res, 204);
     }
 
     if (method === "POST" && url.pathname === "/v1/runs") {
-      authorize(req, origin);
+      const owner = authorize(req, origin).id;
       const body = await readJson(req, runSchema);
+      if (body.session_id !== undefined && !sessions.owns(body.session_id, owner))
+        throw new HttpError(404, "conversation_not_found", "No such conversation for this browser");
       if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
-      const run = runs.create(body.session_id ?? crypto.randomUUID());
+      const run = runs.create(body.session_id ?? crypto.randomUUID(), owner);
+      if (body.session_id === undefined) sessions.add(run.sessionId, owner);
       void runClaude(
         run,
         { prompt: body.prompt, resume: body.session_id !== undefined, title: body.title ?? titleFrom(body.prompt) },
@@ -159,7 +185,7 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
     }
 
     if (method === "POST" && url.pathname === "/v1/briefings") {
-      authorize(req, origin);
+      const owner = authorize(req, origin).id;
       if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
       const available = connectors();
       if (!canBrief(available))
@@ -168,13 +194,13 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
           "no_connectors",
           "No connectors to read yet. Connect Gmail, Google Calendar, Slack or GitHub in Claude, set connectors in the bridge's config.json, then restart it.",
         );
-      const run = runs.create(crypto.randomUUID());
+      const run = runs.create(crypto.randomUUID(), owner);
       void runBriefing(run, config, version, available);
       return sendJson(res, 201, { runId: run.id, stream: streamFor(run) });
     }
 
     if (method === "POST" && url.pathname === "/v1/calendar/weeks") {
-      authorize(req, origin);
+      const owner = authorize(req, origin).id;
       const week = parseWeekStart((await readJson(req, calendarWeekSchema)).week_start);
       if ("error" in week) throw new HttpError(400, "invalid_week", week.error);
       if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
@@ -185,13 +211,13 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
           "no_calendar",
           "Google Calendar isn't connected. Connect it in Claude, add it to connectors in the bridge's config.json, then restart it.",
         );
-      const run = runs.create(crypto.randomUUID());
+      const run = runs.create(crypto.randomUUID(), owner);
       void runCalendarWeek(run, config, version, available, week.monday);
       return sendJson(res, 201, { runId: run.id, stream: streamFor(run) });
     }
 
     if (method === "POST" && url.pathname === "/v1/mail/triage") {
-      authorize(req, origin);
+      const owner = authorize(req, origin).id;
       const { days } = await readJson(req, mailTriageSchema);
       if (runs.busy) throw new HttpError(409, "busy", "Claude is still answering another request");
       const available = connectors();
@@ -201,7 +227,7 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
           "no_gmail",
           "Gmail isn't connected. Connect it in Claude, add it to connectors in the bridge's config.json, then restart it.",
         );
-      const run = runs.create(crypto.randomUUID());
+      const run = runs.create(crypto.randomUUID(), owner);
       void runMailTriage(run, config, version, available, days);
       return sendJson(res, 201, { runId: run.id, stream: streamFor(run) });
     }
@@ -213,17 +239,17 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
       // Credentials before lookup, so an unauthenticated caller can't probe which runs exist.
       if (method === "GET" && action === "stream") {
         const ticket = url.searchParams.get("ticket");
-        if (!ticket || !tickets.isValid(ticket, runId))
+        if (!ticket || !tickets.use(ticket, runId))
           throw new HttpError(401, "invalid_ticket", "Missing or expired stream ticket");
-        return streamRun(req, res, runOr404(runId));
+        const run = runs.get(runId);
+        if (!run) throw new HttpError(404, "run_not_found", "No such run (finished runs are kept 10 minutes)");
+        return streamRun(req, res, run);
       }
       if (method === "POST" && action === "tickets") {
-        authorize(req, origin);
-        return sendJson(res, 200, streamFor(runOr404(runId)));
+        return sendJson(res, 200, streamFor(runOr404(runId, authorize(req, origin).id)));
       }
       if (method === "GET" && action === "result") {
-        authorize(req, origin);
-        const run = runOr404(runId);
+        const run = runOr404(runId, authorize(req, origin).id);
         if (!run.result)
           throw run.finished
             ? new HttpError(404, "no_result", "This run ended without a result")
@@ -231,8 +257,7 @@ export function createBridgeServer({ config, version, tokens, pairing, connector
         return sendJson(res, 200, { [run.result.key]: run.result.value });
       }
       if (method === "POST" && action === "cancel") {
-        authorize(req, origin);
-        runOr404(runId).abort.abort();
+        runOr404(runId, authorize(req, origin).id).abort.abort();
         return sendEmpty(res, 202);
       }
     }

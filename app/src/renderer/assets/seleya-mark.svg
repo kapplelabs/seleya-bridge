@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Seleya mark: the assistant's aurora orb. Single source for the favicon and every in-app logo. -->
+  <defs>
+    <linearGradient id="seleya-aurora" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8B5CF6"/>
+      <stop offset="0.55" stop-color="#EC4899"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+    <radialGradient id="seleya-core" cx="32" cy="32" r="22" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="seleya-shine" cx="23" cy="19" r="11" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#seleya-aurora)"/>
+  <circle cx="32" cy="32" r="22" fill="url(#seleya-core)"/>
+  <circle cx="23" cy="19" r="11" fill="url(#seleya-shine)"/>
+  <circle cx="32" cy="32" r="29.5" stroke="#FFFFFF" stroke-opacity="0.4"/>
+</svg>

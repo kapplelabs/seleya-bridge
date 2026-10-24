@@ -8,7 +8,8 @@
  * ~/.claude permission rules and hooks never apply to requests coming from a web page. Only the
  * configured tools and the read-only tools of the configured connectors (connectors.ts) exist, and any
  * call that would need approval is denied. What a connector returns loses personal and secret data
- * (redact.ts) before Claude reads it, so it can't end up in an answer.
+ * (redact.ts) before Claude reads it, and the answer is redacted again on its way out (it may quote files
+ * from the workspace, which aren't redacted when Claude reads them).
  */
 import path from "node:path";
 
@@ -27,6 +28,11 @@ import { Redactor } from "./redact.ts";
 import type { Run } from "./runs.ts";
 
 const MAX_DETAIL_LENGTH = 160;
+/**
+ * Answer text is streamed a line at a time, redacted, so a value is never split between two deltas before
+ * redaction sees it whole. A line longer than this is sent up to its last space instead.
+ */
+const MAX_HELD_TEXT = 1000;
 
 /** Input fields worth showing under a connector step, first match wins. */
 const CONNECTOR_DETAIL_FIELDS = [
@@ -55,7 +61,10 @@ export interface TraceStep {
 
 interface TextBlock {
   type: "text";
+  /** What the stream carried: redacted. */
   text: string;
+  /** What Claude wrote, before redaction. */
+  raw: string;
 }
 
 export interface ClaudeTurn {
@@ -200,21 +209,49 @@ export class AnswerMapper {
         if (index !== undefined && event.delta.type === "text_delta") this.appendText(index, event.delta.text);
         return;
       }
+      case "content_block_stop": {
+        const index = this.openBlocks.get(event.index);
+        const block = index === undefined ? undefined : this.blocks[index];
+        if (index !== undefined && block) this.send(index, new Redactor().text(block.raw));
+        return;
+      }
     }
   }
 
   private startBlock(): number {
     const index = this.blocks.length;
-    this.blocks.push({ type: "text", text: "" });
+    this.blocks.push({ type: "text", text: "", raw: "" });
     this.run.emit("seleya.block.started", { index, type: "text" });
     return index;
   }
 
+  /** Holds the text back until its line is complete; see MAX_HELD_TEXT. */
   private appendText(index: number, text: string): void {
     const block = this.blocks[index];
     if (!block || !text) return;
-    block.text += text;
+    block.raw += text;
+    let end = block.raw.lastIndexOf("\n") + 1;
+    if (block.raw.length - end > MAX_HELD_TEXT) end = Math.max(end, block.raw.lastIndexOf(" ") + 1);
+    // A scratch redactor: the run's count is taken once, from the whole answer, in flush().
+    if (end > 0) this.send(index, new Redactor().text(block.raw.slice(0, end)));
+  }
+
+  /** Sends what the redacted text adds to what the stream already carried. */
+  private send(index: number, redacted: string): void {
+    const block = this.blocks[index];
+    if (!block || redacted.length <= block.text.length) return;
+    const text = redacted.slice(block.text.length);
+    block.text = redacted;
     this.run.emit("seleya.block.delta", { index, text });
+  }
+
+  /** Sends what is held back of every block; their text becomes the whole answer, redacted. */
+  private flush(): void {
+    this.blocks.forEach((block, index) => {
+      const redacted = this.redactor.text(block.raw);
+      this.send(index, redacted);
+      block.text = redacted;
+    });
   }
 
   private onToolUse(id: string, name: string, input: unknown): void {
@@ -254,13 +291,14 @@ export class AnswerMapper {
   private complete(resultText: string): void {
     // No partial messages came through (older CLI): show the final text in one block.
     if (this.blocks.length === 0 && resultText) this.appendText(this.startBlock(), resultText);
+    this.flush();
     const trace = this.closeTrace();
     this.run.emit("seleya.message.completed", {
       message: {
         id: this.run.assistantMessageId,
         role: "assistant",
         createdAt: this.run.createdAt.toISOString(),
-        blocks: this.blocks,
+        blocks: this.blocks.map(({ type, text }) => ({ type, text })),
         trace,
         agentIds: [],
         status: "complete",
@@ -271,6 +309,7 @@ export class AnswerMapper {
 
   fail(code: string, message: string, retryable: boolean): void {
     if (this.run.finished) return;
+    this.flush();
     this.closeTrace();
     this.run.emit("seleya.error", { code, message, retryable });
     this.run.emit("stream.done");
