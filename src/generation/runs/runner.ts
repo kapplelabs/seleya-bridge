@@ -870,13 +870,25 @@ export class RunRunner {
           },
           step: (label) => this.timelineStep(label),
           draft: (file, slot) => this.showDraft(file, slot),
+          // Its own conversation: the agent knows the layout and palette it chose.
+          drawPicture: (instruction) => this.ask(instruction),
         });
         // A picture that could not be made is said, not hidden: the result has issues and the reason.
         if (attachPicture)
           later = async () => {
-            const { placed, reason } = await attachPicture();
+            const { placed, drawn, reason } = await attachPicture();
             return placed
-              ? { changed: true }
+              ? {
+                  changed: true,
+                  check: drawn
+                    ? {
+                        name: "picture",
+                        passed: true,
+                        findings: [`Drawn as artwork: no picture could be made (${reason}).`],
+                        attempt: 0,
+                      }
+                    : undefined,
+                }
               : {
                   changed: false,
                   check: {

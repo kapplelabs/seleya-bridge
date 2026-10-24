@@ -424,7 +424,7 @@ async function publish(
     outputs.push({ path: manifest.vector, kind: "svg", slot: "vector", state: "final" });
   }
   if (manifest.visual && existsSync(path.join(folder, manifest.visual)))
-    outputs.push({ path: manifest.visual, kind: "png", slot: "visual", state: "final" });
+    outputs.push({ path: manifest.visual, kind: kindOfPicture(manifest.visual), slot: "visual", state: "final" });
   return outputs;
 }
 

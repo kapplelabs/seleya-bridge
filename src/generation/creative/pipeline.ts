@@ -79,6 +79,94 @@ export interface PipelineContext {
   makeImage: (prompt: string, aspect: string) => Promise<{ file?: string; reason?: string }>;
   step: (label: string) => (status: "done" | "failed", detail?: string) => void;
   draft: (file: string, slot: string) => void;
+  /**
+   * The fallback when no agent can make the picture: the agent that made the design draws it as
+   * SVG (every agent can write code; making images depends on the agent and its quota). Resolves to
+   * its answer.
+   */
+  drawPicture?: (instruction: string) => Promise<string>;
+}
+
+/** The picture drawn as artwork, beside the pages (`url('visual.svg')`). */
+export const DRAWN = "visual.svg";
+
+/**
+ * The SVG in an answer, safe to render: only the <svg> element, without scripts, embedded HTML,
+ * event handlers or references outside the drawing. Undefined when there is none.
+ */
+export function cleanSvg(answer: string): string | undefined {
+  let text = answer;
+  try {
+    const value = answerJson(answer).svg;
+    if (typeof value === "string") text = value;
+  } catch {
+    // the SVG may be the whole answer
+  }
+  const start = text.indexOf("<svg");
+  const end = text.lastIndexOf("</svg>");
+  if (start < 0 || end <= start) return undefined;
+  const svg = text
+    .slice(start, end + "</svg>".length)
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*')/gi, "")
+    .replace(/\s(?:xlink:)?href\s*=\s*("(?!#|data:image\/)[^"]*"|'(?!#|data:image\/)[^']*')/gi, "");
+  return svg.length <= 400_000 ? svg : undefined;
+}
+
+/** Points the pages' picture (`visual.jpg`, or an older design's `visual.png` / `visual.svg`) at `name`. */
+function showPicture(folder: string, pages: { html: string }[], name: string) {
+  for (const page of pages) {
+    const html = path.join(folder, page.html);
+    if (existsSync(html))
+      writeFileSync(html, readFileSync(html, "utf8").replace(/visual\.(?:png|jpg|svg)/g, name));
+  }
+}
+
+/**
+ * Draws the picture as SVG when it could not be made (CREATIVE.md: "build the visual from CSS/SVG
+ * shapes, gradients and patterns"). True when the pages now show the drawing.
+ */
+async function drawInstead(
+  context: PipelineContext,
+  pages: { html: string }[],
+  description: string,
+  reason: string,
+): Promise<boolean> {
+  if (!context.drawPicture) return false;
+  const { folder, size } = context;
+  const concept = readJsonFile(path.join(folder, "out", "concept.json"));
+  const palette = Array.isArray(concept?.palette) ? concept.palette.join(", ") : "the design's colours";
+  const end = context.step("Drawing the picture");
+  try {
+    const svg = cleanSvg(
+      await context.drawPicture(
+        [
+          `No picture could be made (${reason}). Draw it yourself as an SVG instead: ${description}`,
+          `The SVG is the page's background: viewBox="0 0 ${size.width} ${size.height}", width="${size.width}" height="${size.height}".`,
+          `Use shapes, gradients and patterns in the design's palette (${palette}): an illustration with depth and atmosphere, not a flat fill.`,
+          "No text, letters, numbers or logos. Keep the areas where the text sits calm and simple. No scripts, no external images or fonts.",
+          'Do not use tools. Answer with one JSON object: {"svg": "<svg …>…</svg>"}.',
+        ].join("\n"),
+      ),
+    );
+    if (!svg) throw new Error("the answer has no SVG");
+    writeFileSync(path.join(folder, "out", DRAWN), svg);
+    showPicture(folder, pages, DRAWN);
+    end("done", "Drawn as artwork");
+    return true;
+  } catch (error) {
+    end("failed", error instanceof Error ? error.message : String(error));
+    return false;
+  }
+}
+
+function readJsonFile(file: string): Record<string, unknown> | undefined {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
 }
 
 const str = (value: unknown) => (typeof value === "string" ? value : undefined);
@@ -103,7 +191,7 @@ function placeVisual(folder: string, file: string | undefined): boolean {
  */
 export async function runCreativePipeline(
   context: PipelineContext,
-): Promise<{ attachPicture?: () => Promise<{ placed: boolean; reason?: string }> }> {
+): Promise<{ attachPicture?: () => Promise<{ placed: boolean; drawn?: boolean; reason?: string }> }> {
   mkdirSync(path.join(context.folder, "out"), { recursive: true });
   if (typeof context.request.edit_instruction === "string") {
     await runEdit(context);
@@ -157,13 +245,20 @@ export async function runCreativePipeline(
   writeFileSync(out("result.json"), JSON.stringify(manifest));
   const pending = picture;
   if (!pending) return {};
+  const description = str(answer.image_prompt) ?? "";
   return {
     attachPicture: async () => {
       const made = await pending;
-      if (!placeVisual(folder, made.file)) return { placed: false, reason: made.reason ?? "no agent made it" };
-      context.draft(`out/${VISUAL}`, "visual");
-      writeFileSync(out("result.json"), JSON.stringify({ ...manifest, visual: `out/${VISUAL}` }));
-      return { placed: true };
+      if (placeVisual(folder, made.file)) {
+        context.draft(`out/${VISUAL}`, "visual");
+        writeFileSync(out("result.json"), JSON.stringify({ ...manifest, visual: `out/${VISUAL}` }));
+        return { placed: true };
+      }
+      const reason = made.reason ?? "no agent made it";
+      if (!(await drawInstead(context, manifest.pages, description, reason))) return { placed: false, reason };
+      context.draft(`out/${DRAWN}`, "visual");
+      writeFileSync(out("result.json"), JSON.stringify({ ...manifest, visual: `out/${DRAWN}` }));
+      return { placed: true, drawn: true, reason };
     },
   };
 }
@@ -199,27 +294,25 @@ async function runEdit(context: PipelineContext): Promise<void> {
       changed += result.count;
     }
   }
-  let visual = existsSync(path.join(folder, "out", VISUAL));
+  let visual = (previous as { visual?: string }).visual;
   if (kind === "image" && str(answer.image_prompt)) {
     endEdit("done", "New picture requested");
     const endPicture = context.step("Making the picture");
     const { file, reason } = await context.makeImage(str(answer.image_prompt)!, aspectOf(context.size));
     endPicture(file ? "done" : "failed", reason);
-    if (!file) throw new Error(`no new picture could be made: ${reason ?? "no agent made it"}`);
     if (placeVisual(folder, file)) {
-      visual = true;
-      changed += 1;
       // A design made by the agent loop shows `visual.png`: point it at the new picture.
-      for (const page of pages) {
-        const html = path.join(folder, page.html);
-        if (existsSync(html))
-          writeFileSync(html, readFileSync(html, "utf8").split("visual.png").join(VISUAL));
-      }
-    }
+      showPicture(folder, pages, VISUAL);
+      visual = `out/${VISUAL}`;
+      changed += 1;
+    } else if (await drawInstead(context, pages, str(answer.image_prompt)!, reason ?? "no agent made it")) {
+      visual = `out/${DRAWN}`;
+      changed += 1;
+    } else throw new Error(`no new picture could be made: ${reason ?? "no agent made it"}`);
   } else endEdit(changed ? "done" : "failed", `${kind}: ${changed} change(s)`);
   if (changed === 0) throw new Error("the edit changed nothing on the design");
   writeFileSync(
     path.join(folder, "out", "result.json"),
-    JSON.stringify({ ...previous, ...(visual ? { visual: `out/${VISUAL}` } : {}) }),
+    JSON.stringify({ ...previous, ...(visual ? { visual } : {}) }),
   );
 }
