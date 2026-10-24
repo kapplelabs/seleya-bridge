@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 
 import { classifyFailure, failureMessage } from "./classify.ts";
+import { withoutPaths } from "./describe.ts";
 import { PARSERS, type StreamKind } from "./parsers.ts";
 import { spawnHarness } from "./process.ts";
 import type {
@@ -54,6 +55,14 @@ export interface CliDefinition {
   probe: () => Promise<{ signedIn: boolean; version?: string; detail?: string }>;
 }
 
+/** "Antigravity was not allowed to read …/transcript.jsonl (outside this run's folder)." */
+export function deniedMessage(agent: string, action: string, folder: string): string {
+  const match = /^([a-z_]+)\((.*)\)$/.exec(action);
+  const verb = (match?.[1] ?? "use").replace(/_file$/, "").replace(/_/g, " ");
+  const target = withoutPaths(match?.[2] ?? "", folder);
+  return `${agent} was not allowed to ${verb} ${target || "a file"} (outside this run's folder) and stopped.`;
+}
+
 /** A harness that runs a CLI agent headless and reads its JSON stream. */
 export class CliHarness implements Harness {
   readonly id: string;
@@ -98,16 +107,21 @@ export class CliHarness implements Harness {
     const listeners: ((activity: HarnessActivity) => void)[] = [];
     const errors: string[] = [];
     let outcome: { ok: boolean; text?: string } | undefined;
+    let denied: string | undefined;
 
     proc.onLine((line) => {
       const parsed = parse(line);
       if (parsed.error) errors.push(parsed.error);
+      if (parsed.denied) denied = parsed.denied;
       if (parsed.outcome) outcome = parsed.outcome;
       for (const activity of parsed.activity) for (const listener of listeners) listener(activity);
     });
 
     const exited: Promise<HarnessExit> = proc.exited.then(({ code, stderr }) => {
-      if (outcome?.ok || (!outcome && code === 0 && errors.length === 0)) return { ok: true };
+      if (outcome?.ok || (!outcome && code === 0 && errors.length === 0))
+        return denied
+          ? { ok: true, code: "denied", message: deniedMessage(definition.name, denied, input.folder) }
+          : { ok: true };
       const text = [outcome?.text, ...errors, stderr].filter(Boolean).join("\n");
       const failure = code === 127 && !outcome ? "crashed" : classifyFailure(text);
       return {
