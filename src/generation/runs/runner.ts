@@ -600,8 +600,11 @@ export class RunRunner {
       runAgain: (prompt, options) => this.runAgain(prompt, options),
     });
     const checks = extra ? [...result.checks, extra] : result.checks;
+    // Seleya's own previews (`*.draft.png`) are never results: a design's preview showed instead of
+    // its final picture.
     const drafts = this.run.outputs.filter(
-      (draft) => !result.outputs.some((output) => output.path === draft.path),
+      (draft) =>
+        !result.outputs.some((output) => output.path === draft.path) && !/\.draft\./.test(draft.path),
     );
     this.save({
       outputs: [
@@ -870,8 +873,35 @@ export class RunRunner {
           },
           step: (label) => this.timelineStep(label),
           draft: (file, slot) => this.showDraft(file, slot),
+          // Its own conversation: the agent knows the layout and palette it chose.
+          drawPicture: (instruction) => this.ask(instruction),
         });
-        if (attachPicture) later = async () => ({ changed: await attachPicture() });
+        // A picture that could not be made is said, not hidden: the result has issues and the reason.
+        if (attachPicture)
+          later = async () => {
+            const { placed, drawn, reason } = await attachPicture();
+            return placed
+              ? {
+                  changed: true,
+                  check: drawn
+                    ? {
+                        name: "picture",
+                        passed: true,
+                        findings: [`Drawn as artwork: no picture could be made (${reason}).`],
+                        attempt: 0,
+                      }
+                    : undefined,
+                }
+              : {
+                  changed: false,
+                  check: {
+                    name: "picture",
+                    passed: false,
+                    findings: [`No picture was made (${reason}). The design keeps its colours; try again later.`],
+                    attempt: 0,
+                  },
+                };
+          };
       }
       await this.finishAgent(later);
     } catch (error) {

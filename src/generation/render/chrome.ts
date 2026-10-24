@@ -1,24 +1,22 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { findBrowsers, launchBrowser } from "./launch.ts";
 import { printCopy } from "./print.ts";
 
 /**
  * One headless Chrome per runtime, driven over the DevTools protocol (research R1). Renders a design
  * page at an exact size to PNG and PDF and measures its text boxes, in a single page load.
  */
-const CHROME_PATHS = [
-  process.env.SELEYA_CHROME,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-].filter((item): item is string => Boolean(item));
+/** Rendering is not possible here right now (no browser, it would not start, or it stalled). */
+export class RenderError extends Error {
+  override name = "RenderError";
+}
 
 export function findChrome(): string | undefined {
-  return CHROME_PATHS.find((candidate) => existsSync(candidate));
+  return findBrowsers()[0];
 }
 
 /** A text block as rendered: its box, its colour and its text. */
@@ -158,31 +156,9 @@ export class ChromeRenderer {
 
   private start(): Promise<Cdp> {
     this.cdp ??= (async () => {
-      const chrome = findChrome();
-      if (!chrome) throw new Error("Google Chrome was not found; it is needed to render designs.");
-      rmSync(path.join(this.dataDir, "DevToolsActivePort"), { force: true });
-      mkdirSync(this.dataDir, { recursive: true });
-      this.process = spawn(
-        chrome,
-        [
-          "--headless=new",
-          "--remote-debugging-port=0",
-          `--user-data-dir=${this.dataDir}`,
-          "--allow-file-access-from-files",
-          "--hide-scrollbars",
-          "--no-first-run",
-          "--no-default-browser-check",
-          "--disable-gpu",
-          "about:blank",
-        ],
-        { stdio: "ignore" },
-      );
-      const portFile = path.join(this.dataDir, "DevToolsActivePort");
-      for (let attempt = 0; attempt < 100 && !existsSync(portFile); attempt++)
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      if (!existsSync(portFile)) throw new Error("Chrome did not start its DevTools endpoint.");
-      const [port, browserPath] = readFileSync(portFile, "utf8").trim().split("\n");
-      const socket = new WebSocket(`ws://127.0.0.1:${port}${browserPath}`);
+      const launched = await launchBrowser(this.dataDir);
+      this.process = launched.process;
+      const socket = new WebSocket(launched.endpoint);
       await new Promise<void>((resolve, reject) => {
         socket.addEventListener("open", () => resolve(), { once: true });
         socket.addEventListener("error", () => reject(new Error("Could not connect to Chrome.")), {
@@ -197,7 +173,10 @@ export class ChromeRenderer {
     return this.cdp;
   }
 
-  /** Renders one HTML file at an exact size. Renders run one at a time. */
+  /**
+   * Renders one HTML file at an exact size. Renders run one at a time. Any failure is a RenderError:
+   * the post-processors then deliver the design without rendering instead of failing the run.
+   */
   render(
     file: string,
     width: number,
@@ -205,9 +184,11 @@ export class ChromeRenderer {
     options: { pdf?: boolean; keepTogether?: string[] } = {},
   ): Promise<RenderResult> {
     // A PDF prints from a copy whose large PNGs are JPEG (print.ts): Chrome stalls on them.
-    const job = this.queue.then(async () =>
-      this.renderNow(options.pdf ? await printCopy(file) : file, width, height, options),
-    );
+    const job = this.queue
+      .then(async () => this.renderNow(options.pdf ? await printCopy(file) : file, width, height, options))
+      .catch((error: unknown) => {
+        throw new RenderError(error instanceof Error ? error.message : String(error));
+      });
     this.queue = job.catch(() => undefined);
     return job;
   }

@@ -16,9 +16,9 @@ Another skill finished its work and needs media from you. Your prompt says which
 
 For every job, in order:
 
-1. Make it with your **built-in generation tool for that kind** (image generation for images, and so on). Follow the prompt and the aspect ratio.
+1. Make it with your **generation tool for that kind**: built in, or a connected MCP tool that makes it (image generation for images, and so on). Follow the prompt and the aspect ratio.
    - Images: **no text, letters, numbers, logos or watermark** in the picture, unless the prompt explicitly asks for one.
-2. Save it exactly at `save_as`. If your tool gives another file type (JPEG, WebP, WAV…), save it with the same name and that extension, for example `out/media/cover.jpg`; Seleya converts it.
+2. Save it exactly at `save_as`. If the tool answers with a link, download it there with one `curl -sSL "<link>" -o <save_as>`. If your tool gives another file type (JPEG, WebP, WAV…), save it with the same name and that extension, for example `out/media/cover.jpg`; Seleya converts it.
 3. If you cannot make a job (the tool is missing, it refused, it failed twice), write one short reason in `out/media/<id>.error.txt` and go on to the next job.
 
 Rules:

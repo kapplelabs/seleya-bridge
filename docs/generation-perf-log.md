@@ -179,3 +179,71 @@ Hướng tiếp theo (cần quota ảnh để đo):
 - p2: đưa sẵn job vào prompt của agent ảnh (đã code xong);
 - p4: chạy các job ảnh song song (mỗi ảnh một agent);
 - p5: hoàn tất deck ngay với artwork theme, gắn ảnh khi về.
+
+### Sự cố "Chrome did not start its DevTools endpoint" (2026-10-24 19:2x)
+
+**Nguyên nhân (tái hiện được):**
+- Khi bridge bị dừng (restart bằng `kill`), Chrome nó đã chạy không tắt theo. Tiến trình đó thành mồ côi (cha là `launchd`) và vẫn giữ `SingletonLock` của profile dùng chung `generation/chrome`.
+- Chrome của bridge mới thấy profile bị khoá nên in "Failed to create a ProcessSingleton … Aborting" rồi thoát.
+- Bridge chờ 10 s không thấy `DevToolsActivePort` và làm fail run.
+
+**Sửa theo lớp:**
+
+| Lớp | Thay đổi |
+|---|---|
+| Phòng | Mỗi tiến trình bridge một profile riêng (`chrome/<pid>`). Khi khởi động, dọn profile của bridge đã chết (kill Chrome mồ côi chỉ khi nó chạy đúng profile đó; xoá lock cũ, kể cả của profile dùng chung đời cũ). Chrome bị kill khi bridge thoát theo bất kỳ đường nào (`process.on("exit")`). |
+| Hồi phục | Chrome không lên thì thử lại với profile mới. Báo kèm dòng lỗi của Chrome. Chrome treo giữa chừng thì khởi động lại (đã có từ R0). |
+| Engine khác | Thử lần lượt Chrome, Chromium, Edge, Brave (macOS, Linux, Windows). |
+| Fallback | Không render được (`RenderError`) thì run không fail. |
+
+Chi tiết lớp fallback:
+- **Poster** được giao dưới dạng trang web `*.preview.html` có ảnh nhúng sẵn; Studio hiển thị trong iframe không chạy script. Check facts và trích dẫn chạy trên chữ của HTML, kèm finding "Not rendered on this computer …". Run ở trạng thái `completed_with_issues`.
+- **Slides** được giao dưới dạng nội dung deck; Writing hiển thị từ JSON.
+- **PDF** in lỗi thì bỏ PDF, vẫn giữ PNG.
+
+**Kiểm chứng:**
+- Test mới `render.test.ts` dựng một Chrome mồ côi giữ (a) profile dùng chung đời cũ và (b) profile của một bridge đã chết. Render đều thành công trong 2.6–2.9 s và Chrome mồ côi bị dừng.
+- Trên thư mục thật `/tmp/seleya-bridge-live/generation/chrome` có lock cũ: render OK 3.8 s, lock được dọn, 0 Chrome mồ côi.
+- Stop bridge giờ không còn để lại Chrome.
+- Test fallback: renderer luôn lỗi thì vẫn ra `poster.preview.html` có ảnh dạng data URL, check facts và trích dẫn pass, check rendering fail.
+- 222 test pass.
+
+### p6 — không có ảnh thì agent thiết kế vẽ SVG; dùng MCP tạo ảnh của người dùng (2026-10-24 19:4x)
+
+**Nguyên tắc:** agent chữ nào cũng viết được code; tạo ảnh thì tuỳ agent và quota. Thứ tự lấy ảnh:
+1. **Agent có năng lực tạo ảnh**, theo thứ tự:
+   - mặc định theo agent (Antigravity, Codex);
+   - `capabilities.json`;
+   - worker của Agent Fabric;
+   - **MCP tạo ảnh người dùng đã cài cho Claude Code**: tự nhận theo tên hoặc lệnh (image, imagen, dall-e, flux, fal, replicate, stability, ideogram, midjourney, recraft, nano-banana…), hoặc khai báo `{"mcp": {"<server>": ["image"]}}`.
+   Chỉ job ảnh mới được bật đúng các server đó (`--mcp-config` + `--strict-mcp-config`, cho phép `mcp__<server>` và `curl` để tải ảnh trả về dạng link). Mọi lần chạy khác của Claude Code vẫn cách ly.
+2. **Không agent nào làm được** (hết quota, không có agent ảnh, agent lỗi): chính agent đã thiết kế vẽ ảnh dạng **SVG**, tiếp tục cùng cuộc hội thoại nên biết bố cục và palette. SVG được làm sạch: chỉ giữ `<svg>`, bỏ `<script>`, `<foreignObject>`, `on*=`, link ra ngoài, giới hạn 400 KB. Các trang chuyển sang `url('visual.svg')`, rồi render và check lại. Kết quả có check "picture" (passed) ghi "Drawn as artwork: …".
+3. Vẽ cũng không được: kết quả báo "Completed with issues — No picture was made (…)".
+
+**Đo thật** (`aasr6b62`, poster Hạt Mộc, quota ảnh vẫn 429):
+
+| Mốc | Thời gian |
+|---|---|
+| Sẵn sàng (thiết kế trên nền màu) | **24 s** |
+| Agent ảnh thử rồi nhận 429 | 91 s |
+| Vẽ SVG (cùng hội thoại) | 29 s |
+| Bản cuối có hình, mọi check pass | 132 s |
+
+- **Chất lượng:** SVG 6.7 KB vẽ cửa sổ, tách cà phê bốc khói, lá cây, đúng palette nâu gỗ và xanh lá; chữ dễ đọc; facts, contrast và layout đều pass.
+- **Chưa đo được:** MCP tạo ảnh thật, vì máy chưa cài MCP nào như vậy (chỉ có codebase-memory, agent-room, murmur, agent-fabric-peer, stitch). Đã có test cho phần nhận diện và cho việc chỉ job ảnh mới được dùng server đó.
+- **Hướng tối ưu tiếp:** khi biết chắc không có agent ảnh nào (ví dụ không agent nào khai báo năng lực ảnh), vẽ SVG ngay thay vì chờ 91 s thử thất bại. Cần quyết định về độ tin của tín hiệu 429 (quota thường hồi trong vài giờ).
+
+225 test pass.
+
+### Bug: Studio hiển thị bản xem trước thay cho bản cuối (2026-10-24 20:0x)
+
+- **Triệu chứng:** người dùng thấy poster không có hình, dù bridge đã vẽ SVG và render lại (`run_063210_mvmfmwute1dd`, PNG cuối trên máy có hình).
+- **Nguyên nhân:**
+  - Khi run hoàn tất, các draft không được post-processor liệt kê lại vẫn được chuyển thành output "final".
+  - Bản xem trước `out/poster.draft.png` (mới có từ pipeline) đứng trước `out/poster.png`.
+  - `generationJson` lấy PNG đầu tiên, nên chọn nhầm bản xem trước.
+- **Sửa:**
+  - Bản xem trước `*.draft.*` không bao giờ thành output.
+  - `generationJson` bỏ qua `*.draft.*` (sửa luôn cho các run cũ đã lưu).
+  - Test: "Studio shows a design's final picture, never its preview".
+- **Kiểm chứng:** tải lại Studio thì cùng run hiển thị `out/poster.png` có hình vẽ. 226 test pass.

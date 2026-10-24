@@ -6,6 +6,8 @@ import { after, test } from "node:test";
 
 import { editContext, PREVIOUS_RESULT, saveLayout, textsInRegion } from "../../src/generation/creative/edit.ts";
 import { plannedFor } from "../../src/generation/runs/manager.ts";
+import type { RunRow } from "../../src/generation/runs/types.ts";
+import { generationJson } from "../../src/generation/server/routes/studio.ts";
 import { answerJson, earlyImagePrompt } from "../../src/generation/creative/pipeline.ts";
 import type { Harness } from "../../src/generation/harness/types.ts";
 import {
@@ -18,7 +20,7 @@ import {
 import { creativePostProcessor, expectedSize, quotedText } from "../../src/generation/creative/postprocess.ts";
 import { usecaseOf } from "../../src/generation/creative/usecases.ts";
 import type { ScriptAction } from "../../src/generation/harness/scripted.ts";
-import { ChromeRenderer, findChrome } from "../../src/generation/render/chrome.ts";
+import { ChromeRenderer, findChrome, RenderError } from "../../src/generation/render/chrome.ts";
 import { decodePng } from "../../src/generation/render/png.ts";
 import { recipeSkill, signedRecipe } from "./recipes.ts";
 import { advanceUntil, eventsOf, makeTestApp } from "./helpers.ts";
@@ -195,7 +197,10 @@ test(
         [false, true],
         "failed once, then passed after the fix",
       );
-      assert.ok(done.steps.some((step) => step.label.startsWith("Fixing what the checks found")));
+      assert.ok(done.steps.some((step) => step.label === "Polishing the design"));
+      // Something to polish is shown calmly: no step of the timeline reads as failed.
+      assert.equal(done.steps.some((step) => step.status === "failed"), false);
+      assert.equal(done.steps.find((step) => step.label === "Checking the design")?.detail, "1 thing to polish");
       assert.ok(existsSync(path.join(t.config.runsDir, run.id, "out", "poster.png")));
       assert.ok(existsSync(path.join(t.config.runsDir, run.id, "out", "poster.pdf")));
     } finally {
@@ -411,4 +416,151 @@ test("pipeline: the image prompt is read before the answer ends", () => {
   assert.equal(earlyImagePrompt('{"image_prompt": "A café \\"Mộc\\" at dawn", "brief'), 'A café "Mộc" at dawn');
   assert.equal(earlyImagePrompt('{"image_prompt": "A café at da'), undefined);
   assert.deepEqual(answerJson('```json\n{"kind":"text"}\n```'), { kind: "text" });
+});
+
+test("no browser can render: the design is delivered as a web page with its picture, not failed", async () => {
+  const folder = mkdtempSync(path.join(tmpdir(), "unrendered-"));
+  try {
+    mkdirSync(path.join(folder, "out"));
+    writeFileSync(path.join(folder, "out", "visual.jpg"), "jpeg");
+    writeFileSync(
+      path.join(folder, "out", "poster.html"),
+      "<body style=\"background:#222 url('visual.jpg')\"><h1>Coffee Talk</h1><p>08:00</p></body>",
+    );
+    const broken = {
+      render: async () => {
+        throw new RenderError("No Chrome, Chromium, Edge or Brave was found");
+      },
+    } as unknown as ChromeRenderer;
+    const steps: string[] = [];
+    const result = await creativePostProcessor(broken, folder)({
+      run: { request: { prompt: 'Poster "Coffee Talk" at 08:00', width: 1000, height: 1500 } } as never,
+      folder,
+      manifest: { skill: "poster", pages: [{ name: "poster", html: "out/poster.html" }], visual: "out/visual.jpg" },
+      skill: recipeSkill("poster"),
+      skills: new Map([["poster", recipeSkill("poster")]]),
+      emit: () => undefined,
+      step: (label) => (steps.push(label), () => undefined),
+      runAgain: async () => ({ ok: true }),
+    });
+    const page = result.outputs.find((output) => output.kind === "html");
+    assert.equal(page?.path, "out/poster.preview.html");
+    const preview = readFileSync(path.join(folder, "out", "poster.preview.html"), "utf8");
+    assert.match(preview, /url\('data:image\/jpeg;base64,/, "the picture travels inside the page");
+    assert.ok(result.outputs.some((output) => output.slot === "visual"));
+    const byName = Object.fromEntries(result.checks.map((check) => [check.name, check.passed]));
+    assert.deepEqual(byName, { facts: true, "quoted text": true, rendering: false });
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: a picture that cannot be made is reported, not hidden", async () => {
+  const quotaOut: Harness = {
+    id: "painter",
+    name: "Painter",
+    check: async () => ({ installed: true, signedIn: true, canGenerateImages: true, capabilities: ["image"] }),
+    start: (input) => {
+      writeFileSync(path.join(input.folder, "out", "media", "visual.error.txt"), "Image quota exhausted (429)");
+      return { onActivity: () => undefined, exited: Promise.resolve({ ok: true }), stop: async () => undefined };
+    },
+  };
+  const t = makeTestApp({ mediaAgents: async () => [quotaOut] });
+  try {
+    const { digest } = t.app.recipes.accept(
+      signedRecipe("poster", (recipe) => {
+        recipe.files["poster/SPEC.md"] = "# Poster\n\nFollow `skills/CREATIVE-SPEC.md`.";
+        recipe.files["CREATIVE-SPEC.md"] = "Answer with one JSON object.";
+        recipe.files["poster/recipe.json"] = JSON.stringify({ ...JSON.parse(recipe.files["poster/recipe.json"]!), pipeline: "spec" });
+      }),
+    );
+    const answer = JSON.stringify({
+      image_prompt: "A monolith, no text",
+      brief: {},
+      concept: {},
+      pages: [{ name: "poster", html: "<body style='background:#111'><h1>Seleya</h1></body>" }],
+    });
+    const run = t.app.manager.create({
+      skill: "poster",
+      title: "No picture",
+      request: { recipe_digest: digest, prompt: "Seleya", width: 1000, height: 1500, script: [{ answer }] },
+    });
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus) && t.app.manager.get(run.id).phase === "completed");
+    const done = t.app.manager.get(run.id);
+    assert.equal(done.localStatus, "completed_with_issues");
+    const picture = done.checks.find((check) => check.name === "picture");
+    assert.equal(picture?.passed, false);
+    assert.match(picture?.findings[0] ?? "", /No picture was made \(Image quota exhausted \(429\)\)/);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("pipeline: with no picture, the design's agent draws one as SVG, cleaned of anything active", async () => {
+  const quotaOut: Harness = {
+    id: "painter",
+    name: "Painter",
+    check: async () => ({ installed: true, signedIn: true, canGenerateImages: true, capabilities: ["image"] }),
+    start: (input) => {
+      writeFileSync(path.join(input.folder, "out", "media", "visual.error.txt"), "Image quota exhausted (429)");
+      return { onActivity: () => undefined, exited: Promise.resolve({ ok: true }), stop: async () => undefined };
+    },
+  };
+  const t = makeTestApp({ mediaAgents: async () => [quotaOut] });
+  try {
+    const { digest } = t.app.recipes.accept(
+      signedRecipe("poster", (recipe) => {
+        recipe.files["poster/SPEC.md"] = "# Poster\n\nFollow `skills/CREATIVE-SPEC.md`.";
+        recipe.files["CREATIVE-SPEC.md"] = "Answer with one JSON object.";
+        recipe.files["poster/recipe.json"] = JSON.stringify({ ...JSON.parse(recipe.files["poster/recipe.json"]!), pipeline: "spec" });
+      }),
+    );
+    const design = JSON.stringify({
+      image_prompt: "A black monolith with a violet light, no text",
+      brief: {},
+      concept: { palette: ["#000000", "#7c3aed"] },
+      pages: [{ name: "poster", html: "<body style=\"background:#111 url('visual.jpg') center/cover\"><h1>Seleya</h1></body>" }],
+    });
+    const drawing = JSON.stringify({
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1500"><script>alert(1)</script><rect width="1000" height="1500" fill="#000" onload="steal()"/><image href="http://evil.example/x.png"/><rect x="480" width="40" height="1500" fill="#7c3aed"/></svg>',
+    });
+    const run = t.app.manager.create({
+      skill: "poster",
+      title: "Drawn",
+      request: { recipe_digest: digest, prompt: "Seleya", width: 1000, height: 1500, scripts: [[{ answer: design }], [{ answer: drawing }]] },
+    });
+    await advanceUntil(t.clock, () => finished(t.app.manager.get(run.id).localStatus) && t.app.manager.get(run.id).phase === "completed");
+    const done = t.app.manager.get(run.id);
+    assert.equal(done.localStatus, "completed", JSON.stringify(done.checks));
+    const out = path.join(t.config.runsDir, run.id, "out");
+    const svg = readFileSync(path.join(out, "visual.svg"), "utf8");
+    assert.match(svg, /fill="#7c3aed"/);
+    assert.doesNotMatch(svg, /script|onload|evil\.example/);
+    assert.match(readFileSync(path.join(out, "poster.html"), "utf8"), /url\('visual\.svg'\)/);
+    assert.equal(JSON.parse(readFileSync(path.join(out, "result.json"), "utf8")).visual, "out/visual.svg");
+    assert.match(done.checks.find((check) => check.name === "picture")?.findings[0] ?? "", /Drawn as artwork/);
+  } finally {
+    await t.cleanup();
+  }
+});
+
+test("Studio shows a design's final picture, never its preview", () => {
+  const run = {
+    id: "run_x",
+    request: { width: 1000, height: 1500 },
+    attempt: 1,
+    localStatus: "completed",
+    phase: "completed",
+    checks: [],
+    outputs: [
+      { path: "out/poster.draft.png", kind: "png", slot: "poster", state: "final" },
+      { path: "out/poster.png", kind: "png", slot: "poster", state: "final" },
+      { path: "out/visual.svg", kind: "svg", slot: "visual", state: "final" },
+    ],
+  } as unknown as RunRow;
+  const json = generationJson(
+    { id: "gen_x", title: "Seleya", request: { format: "poster" }, runIds: ["run_x"], createdAt: 0 },
+    [run],
+  );
+  assert.match(String(json.images[0]?.url), /out\/poster\.png/);
 });

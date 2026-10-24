@@ -101,7 +101,7 @@ export function measure(home: string, row: Record<string, unknown>): RunMeasure 
       .filter((step) => match(step.label))
       .reduce((total, step) => total + seconds(step.startedAt, step.finishedAt), 0);
   const isSeleya = (label: string) => /^(Rendering|Checking)/.test(label);
-  const isFix = (label: string) => /^Fixing what the checks found/.test(label);
+  const isFix = (label: string) => /^(Fixing what the checks found|Polishing)/.test(label);
   const isMedia = (label: string) => /^Making|^Picture|^Image/.test(label);
   const agentSteps = steps.filter((step) => !isSeleya(step.label) && !isFix(step.label) && !isMedia(step.label));
   const firstAgent = Math.min(...agentSteps.map((step) => step.startedAt ?? Infinity));
